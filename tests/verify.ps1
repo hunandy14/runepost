@@ -216,27 +216,25 @@ $script:ErrPatterns = @{
     curve   = 'P-?256|prime256|nistP256|曲線'
 }
 
-function Expect-Failure {
-    <#
-        -ErrOnly：只比對 $Res.StdErr，不含 $Res.StdOut。
+# rune-seal.ps1 只要成功載入公鑰，就會在「打包中」之前無條件印出「收件人公鑰指紋：
+# RUNE-KEY …（請與解密端 …指紋逐字比對；不符代表公鑰可能已被掉包）」這段橫幅。
+# 這段橫幅本身就含 RUNE（→ format 類的 'RUNE'）、KEY（→ key 類的 'key'，-match
+# 預設不分大小寫）、公鑰（→ nopub 類的 '公鑰'），所以拿 $Res.All（stdout+stderr）
+# 比對這三類，任何 seal 端失敗案例都會無條件命中——不管真正的錯誤訊息有沒有指明
+# 環節。真正的錯誤訊息一律經頂層 catch 用 [Console]::Error.WriteLine 印到 stderr
+# （見 flow/seal-main.ps1 / flow/open-main.ps1 的進入點），所以只比對 StdErr 才是
+# 比對「錯誤訊息本身」。
+#
+# 這條規則直接寫在 Expect-Failure 內部、依 $Category 自動決定，不做成呼叫端要
+# 記得加的開關——開關不管寫得再清楚，新案例還是可能忘記加，等於規則沒有任何
+# 程式碼在執行；寫進函式內部才會在每一次呼叫都自動生效。
+$script:BannerSensitiveCategories = @('format', 'key', 'nopub')
 
-        為什麼需要：rune-seal.ps1 只要成功載入公鑰，就會在「打包中」之前無條件印出
-        「收件人公鑰指紋：RUNE-KEY …（請與解密端 …指紋逐字比對；不符代表公鑰可能已
-        被掉包）」這段橫幅。這段橫幅本身就含 RUNE（→ format 類的 'RUNE'）、KEY（→
-        key 類的 'key'，-match 預設不分大小寫）、公鑰（→ nopub 類的 '公鑰'），所以只
-        要拿 $Res.All（stdout+stderr）比對 format / key / nopub 這三類，任何 seal 端
-        失敗案例都會無條件命中——不管真正的錯誤訊息有沒有指明環節。
-        真正的錯誤訊息一律經頂層 catch 用 [Console]::Error.WriteLine 印到 stderr（見
-        flow/seal-main.ps1 / flow/open-main.ps1 的進入點），所以只比對 StdErr 才是
-        比對「錯誤訊息本身」，而不是被成功路徑的進度輸出污染。
-        seal 端斷言 format / key / nopub 這三類時必須加 -ErrOnly；其餘類別（exists /
-        nomatch / input / param / tag / unsafe / curve / …）不受銀幕橫幅影響，可維持
-        比對 $Res.All 不變。
-    #>
-    param($Res, [string]$Category, [string]$What, [switch]$ErrOnly)
+function Expect-Failure {
+    param($Res, [string]$Category, [string]$What)
     Assert (-not $Res.TimedOut) "$What：子行程逾時（可能卡在互動提示）"
     Assert ($Res.Failed) ("$What：應該失敗卻成功了 (exit={0}, stderr 空)" -f $Res.ExitCode)
-    $msg = if ($ErrOnly) { $Res.StdErr } else { $Res.All }
+    $msg = if ($script:BannerSensitiveCategories -contains $Category) { $Res.StdErr } else { $Res.All }
     $pat = $script:ErrPatterns[$Category]
     Assert ($msg -match $pat) ("$What：有失敗但訊息未指明環節[$Category] => " + (Squash $msg 200))
     return ("exit={0}; msg={1}" -f $Res.ExitCode, (Squash $msg 90))
@@ -1630,7 +1628,8 @@ function Invoke-VerifyTrack {
     # 檔案存在但非合法 PEM（C60，本案）。三案合起來才覆蓋 Get-RunePublicKey 的
     # 全部失敗分支。C61 / C62 補上 -PublicKey 走「檔案路徑」與「PEM 字串」兩種
     # 解析分支各自的找不到／格式錯誤情境。三案的錯誤訊息一律只比對 $r.StdErr
-    # （見 Expect-Failure 的 -ErrOnly 說明），不受 seal 端指紋橫幅影響。
+    # （與 Expect-Failure 對 format / key / nopub 三類自動採用的比對基準一致），
+    # 不受 seal 端指紋橫幅影響。
 
     Invoke-TCase 'C60' '~\.rune\public.pem 存在但非合法 PEM → 報公鑰格式無效' {
         $sb = New-HomeSandbox -Name 'badpem'
