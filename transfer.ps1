@@ -338,7 +338,11 @@ function New-CtxtContainer {
         [byte[]] $Ciphertext
     )
     $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:CtxtMagic)
-    $lenBytes = [BitConverter]::GetBytes([uint16] $EphPubKey.Length)
+    # 明確指定小端序寫入，不依賴 BitConverter 隨執行平台而定的位元組順序
+    # （Windows 上兩者結果相同，但明確指定較不易出錯，也符合容器格式的
+    # 「uint16 LE」宣告）。
+    $lenBytes = [byte[]]::new(2)
+    [System.Buffers.Binary.BinaryPrimitives]::WriteUInt16LittleEndian($lenBytes, [uint16] $EphPubKey.Length)
 
     $ms = [System.IO.MemoryStream]::new()
     $ms.Write($magicBytes, 0, $magicBytes.Length)
@@ -502,7 +506,9 @@ function ConvertFrom-CtxtContainer {
         throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:CtxtVersion)"
     }
 
-    $ephPubKeyLen = [BitConverter]::ToUInt16($Bytes, 5)
+    # 明確指定小端序讀取，對應寫入端 New-CtxtContainer 的 WriteUInt16LittleEndian
+    $ephPubKeyLenBytes = Get-ByteRange -Source $Bytes -Offset 5 -Length 2
+    $ephPubKeyLen = [System.Buffers.Binary.BinaryPrimitives]::ReadUInt16LittleEndian($ephPubKeyLenBytes)
     $offset = 7
     $minTotal = $offset + $ephPubKeyLen + $Script:NonceLength + $Script:TagLength
     if ($Bytes.Length -lt $minTotal) {
