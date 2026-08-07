@@ -4,12 +4,12 @@
     密文傳輸工具 — 兩台自有 Windows 機器間，經公開純文字管道（論壇/pastebin）單向傳檔。
 
 .DESCRIPTION
-    流程：打包（ZIP/store）→ 壓縮（Brotli）→ 加密（AES-256-GCM，金鑰以 RSA-4096-OAEP 包裹）→ 文字編碼（Base64）。
+    流程：打包（ZIP/store）→ 壓縮（Brotli）→ 加密（ECDH P-256 + HKDF-SHA256 派生 AES-256-GCM 金鑰）→ 文字編碼（Base64）。
     純 .NET 內建類別實作，零外部依賴，全程 .NET stream / 記憶體操作，不讓二進位資料經過 PowerShell 管道。
 
 .EXAMPLE
     .\transfer.ps1 -GenerateKeys
-    產生 RSA-4096 金鑰對，私鑰存到 ~\.ctxt\private.pem，並在畫面印出公鑰 PEM。
+    產生 ECDH P-256 金鑰對，私鑰存到 ~\.ctxt\private.pem，並在畫面印出公鑰 PEM。
 
 .EXAMPLE
     .\transfer.ps1 -Pack C:\data\report.docx
@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # 使用方式：
 #   1. 先在「解密端」（保管私鑰的那台機器）執行：
 #        pwsh .\transfer.ps1 -GenerateKeys
-#      私鑰會寫到 ~\.ctxt\private.pem，畫面會印出對應的公鑰 PEM。
+#      私鑰（ECDH P-256）會寫到 ~\.ctxt\private.pem，畫面會印出對應的公鑰 PEM。
 #   2. 把印出的 "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----"
 #      完整貼到下面 $PublicKeyPem 這個 here-string 裡（保留左右單引號 @' / '@）。
 #   3. 把貼好公鑰的這份腳本複製/分發到「加密端」機器即可執行 -Pack。
@@ -65,12 +65,20 @@ $PublicKeyPem = ''
 
 # ==========================================================================
 # 容器二進位格式（加密前於記憶體組好，再整體 Base64）：
-#   magic "CTXT"(4B ASCII) | version 0x01(1B) | wrappedKeyLen(uint16 LE)
-#   | RSA 包裹的 AES 金鑰 | nonce(12B) | tag(16B) | ciphertext
+#   magic "CTXT"(4B ASCII) | version 0x02(1B) | ephPubKeyLen(uint16 LE)
+#   | ephemeral ECDH P-256 公鑰（SubjectPublicKeyInfo DER）| nonce(12B) | tag(16B) | ciphertext
 #   明文側被加密的內容 = Brotli( Zip( 輸入 ) )
+#
+#   金鑰交換／派生（version 2）：
+#     每次 -Pack 產生一次性 ephemeral ECDH P-256 金鑰對，與腳本內嵌的靜態
+#     公鑰做 ECDH（DeriveRawSecretAgreement）得共享祕密；再以
+#     HKDF-SHA256(ikm = 共享祕密, salt = nonce, info = magic+version+ephemeral公鑰DER)
+#     派生 32 bytes 的 AES-256-GCM 金鑰。salt 選用 nonce（而非空）是為了讓每次
+#     Pack 產生的金鑰額外與該次的 nonce 綁定；info 內含 magic/version/ephemeral
+#     公鑰，確保派生結果與容器內容一一對應、不可跨欄位替換。
 # ==========================================================================
 $Script:CtxtMagic = 'CTXT'
-$Script:CtxtVersion = [byte] 1
+$Script:CtxtVersion = [byte] 2
 $Script:NonceLength = 12
 $Script:TagLength = 16
 $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.ctxt'
@@ -222,54 +230,72 @@ function Compress-CtxtBrotli {
 }
 
 # ==========================================================================
-# 區塊：加密 — 加密方向（AES-256-GCM + RSA-4096-OAEP-SHA256 包裹金鑰）
+# 區塊：金鑰交換與派生（ECDH P-256 + HKDF-SHA256，加解密共用）
 # ==========================================================================
 
-function Protect-CtxtAesGcm {
-    <# 產生一次性 AES-256 金鑰與 12B nonce，GCM 加密，回傳 Key/Nonce/Tag/Ciphertext #>
-    param([byte[]] $PlainBytes)
+function New-CtxtEcdhKeyPair {
+    <# 產生一個新的 ECDH P-256 金鑰對（同時持有公私鑰） #>
+    return [System.Security.Cryptography.ECDiffieHellman]::Create(
+        [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
+}
 
-    $key = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
-    $nonce = [byte[]]::new($Script:NonceLength)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
+function Get-CtxtStaticPublicKey {
+    <# 從腳本內嵌的 $PublicKeyPem 載入靜態 ECDH 公鑰（只含公鑰） #>
+    param([string] $PublicKeyPemText)
+    $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
+    try {
+        $ecdh.ImportFromPem($PublicKeyPemText)
+    }
+    catch {
+        throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"
+    }
+    return $ecdh
+}
+
+function Get-CtxtHkdfInfo {
+    <# HKDF 的 info：magic + version + ephemeral 公鑰 DER 位元組 #>
+    param([byte[]] $EphPubKeyDer)
+    $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:CtxtMagic)
+    $info = [byte[]]::new($magicBytes.Length + 1 + $EphPubKeyDer.Length)
+    [System.Buffer]::BlockCopy($magicBytes, 0, $info, 0, $magicBytes.Length)
+    $info[$magicBytes.Length] = $Script:CtxtVersion
+    [System.Buffer]::BlockCopy($EphPubKeyDer, 0, $info, $magicBytes.Length + 1, $EphPubKeyDer.Length)
+    return , $info
+}
+
+function Get-CtxtDerivedAesKey {
+    <# HKDF-SHA256(ikm=共享祕密, salt=nonce, info=magic+version+ephemeral公鑰) -> 32B AES 金鑰 #>
+    param(
+        [byte[]] $SharedSecret,
+        [byte[]] $Nonce,
+        [byte[]] $InfoBytes
+    )
+    return [System.Security.Cryptography.HKDF]::DeriveKey(
+        [System.Security.Cryptography.HashAlgorithmName]::SHA256, $SharedSecret, 32, $Nonce, $InfoBytes)
+}
+
+function Protect-CtxtAesGcm {
+    <# 用外部提供的 AES 金鑰／nonce 做 GCM 加密，回傳 Tag/Ciphertext #>
+    param(
+        [byte[]] $PlainBytes,
+        [byte[]] $AesKey,
+        [byte[]] $Nonce
+    )
+
     $tag = [byte[]]::new($Script:TagLength)
     $cipherBytes = [byte[]]::new($PlainBytes.Length)
 
-    $aesGcm = [System.Security.Cryptography.AesGcm]::new($key, $Script:TagLength)
+    $aesGcm = [System.Security.Cryptography.AesGcm]::new($AesKey, $Script:TagLength)
     try {
-        $aesGcm.Encrypt($nonce, $PlainBytes, $cipherBytes, $tag)
+        $aesGcm.Encrypt($Nonce, $PlainBytes, $cipherBytes, $tag)
     }
     finally {
         $aesGcm.Dispose()
     }
 
     return [pscustomobject]@{
-        Key        = $key
-        Nonce      = $nonce
         Tag        = $tag
         Ciphertext = $cipherBytes
-    }
-}
-
-function Protect-CtxtAesKey {
-    <# 用 RSA 公鑰（OAEP-SHA256）包裹 AES 金鑰 #>
-    param(
-        [byte[]] $AesKey,
-        [string] $PublicKeyPemText
-    )
-    $rsa = [System.Security.Cryptography.RSA]::Create()
-    try {
-        try {
-            $rsa.ImportFromPem($PublicKeyPemText)
-        }
-        catch {
-            throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"
-        }
-        return $rsa.Encrypt($AesKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
-    }
-    finally {
-        $rsa.Dispose()
     }
 }
 
@@ -279,19 +305,19 @@ function Protect-CtxtAesKey {
 
 function New-CtxtContainer {
     param(
-        [byte[]] $WrappedKey,
+        [byte[]] $EphPubKey,
         [byte[]] $Nonce,
         [byte[]] $Tag,
         [byte[]] $Ciphertext
     )
     $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:CtxtMagic)
-    $lenBytes = [BitConverter]::GetBytes([uint16] $WrappedKey.Length)
+    $lenBytes = [BitConverter]::GetBytes([uint16] $EphPubKey.Length)
 
     $ms = [System.IO.MemoryStream]::new()
     $ms.Write($magicBytes, 0, $magicBytes.Length)
     $ms.WriteByte($Script:CtxtVersion)
     $ms.Write($lenBytes, 0, 2)
-    $ms.Write($WrappedKey, 0, $WrappedKey.Length)
+    $ms.Write($EphPubKey, 0, $EphPubKey.Length)
     $ms.Write($Nonce, 0, $Nonce.Length)
     $ms.Write($Tag, 0, $Tag.Length)
     $ms.Write($Ciphertext, 0, $Ciphertext.Length)
@@ -337,12 +363,29 @@ function Invoke-CtxtPack {
     $compressed = Compress-CtxtBrotli -InputBytes $zipBytes
     $compressedSize = $compressed.Length
 
-    Write-Host '加密中（AES-256-GCM + RSA-4096-OAEP-SHA256）...'
-    $aes = Protect-CtxtAesGcm -PlainBytes $compressed
-    $wrappedKey = Protect-CtxtAesKey -AesKey $aes.Key -PublicKeyPemText $PublicKeyPem
-    [Array]::Clear($aes.Key, 0, $aes.Key.Length)
+    Write-Host '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
+    $ephemeral = New-CtxtEcdhKeyPair
+    $staticPub = Get-CtxtStaticPublicKey -PublicKeyPemText $PublicKeyPem
+    try {
+        $sharedSecret = $ephemeral.DeriveRawSecretAgreement($staticPub.PublicKey)
+        $ephPubKeyDer = $ephemeral.ExportSubjectPublicKeyInfo()
 
-    $container = New-CtxtContainer -WrappedKey $wrappedKey -Nonce $aes.Nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
+        $nonce = [byte[]]::new($Script:NonceLength)
+        [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
+
+        $infoBytes = Get-CtxtHkdfInfo -EphPubKeyDer $ephPubKeyDer
+        $aesKey = Get-CtxtDerivedAesKey -SharedSecret $sharedSecret -Nonce $nonce -InfoBytes $infoBytes
+        [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
+
+        $aes = Protect-CtxtAesGcm -PlainBytes $compressed -AesKey $aesKey -Nonce $nonce
+        [Array]::Clear($aesKey, 0, $aesKey.Length)
+    }
+    finally {
+        $ephemeral.Dispose()
+        $staticPub.Dispose()
+    }
+
+    $container = New-CtxtContainer -EphPubKey $ephPubKeyDer -Nonce $nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
 
     $b64Text = [Convert]::ToBase64String($container, [System.Base64FormattingOptions]::InsertLineBreaks)
     [System.IO.File]::WriteAllText($OutFilePath, $b64Text, [System.Text.Encoding]::ASCII)
@@ -378,17 +421,30 @@ function Expand-CtxtBrotli {
 # 區塊：解密 — 解密方向
 # ==========================================================================
 
-function Unprotect-CtxtAesKey {
-    <# 用 RSA 私鑰解開 AES 金鑰包裹 #>
+function Get-CtxtSharedSecretForDecrypt {
+    <# 用自己的 ECDH 私鑰與容器內的 ephemeral 公鑰做 ECDH，得共享祕密 #>
     param(
-        [byte[]] $WrappedKey,
-        [System.Security.Cryptography.RSA] $Rsa
+        [byte[]] $EphPubKeyDer,
+        [System.Security.Cryptography.ECDiffieHellman] $OwnPrivateKey
     )
+    $ephPub = [System.Security.Cryptography.ECDiffieHellman]::Create()
     try {
-        return $Rsa.Decrypt($WrappedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+        $bytesRead = 0
+        try {
+            $ephPub.ImportSubjectPublicKeyInfo($EphPubKeyDer, [ref] $bytesRead)
+        }
+        catch {
+            throw "容器內的 ephemeral 公鑰格式無效：$($_.Exception.Message)"
+        }
+        try {
+            return $OwnPrivateKey.DeriveRawSecretAgreement($ephPub.PublicKey)
+        }
+        catch {
+            throw "ECDH 金鑰交換失敗：私鑰與加密所用的公鑰不匹配，或私鑰檔案已損壞（$($_.Exception.Message)）"
+        }
     }
-    catch {
-        throw "AES 金鑰解密失敗：私鑰與加密所用的公鑰不匹配，或私鑰檔案已損壞（$($_.Exception.Message)）"
+    finally {
+        $ephPub.Dispose()
     }
 }
 
@@ -414,15 +470,15 @@ function ConvertFrom-CtxtContainer {
         throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:CtxtVersion)"
     }
 
-    $wrappedKeyLen = [BitConverter]::ToUInt16($Bytes, 5)
+    $ephPubKeyLen = [BitConverter]::ToUInt16($Bytes, 5)
     $offset = 7
-    $minTotal = $offset + $wrappedKeyLen + $Script:NonceLength + $Script:TagLength
+    $minTotal = $offset + $ephPubKeyLen + $Script:NonceLength + $Script:TagLength
     if ($Bytes.Length -lt $minTotal) {
-        throw '容器格式錯誤：長度不足以包含完整的金鑰／nonce／tag，檔案可能已損壞或被截斷'
+        throw '容器格式錯誤：長度不足以包含完整的 ephemeral 公鑰／nonce／tag，檔案可能已損壞或被截斷'
     }
 
-    $wrappedKey = Get-ByteRange -Source $Bytes -Offset $offset -Length $wrappedKeyLen
-    $offset += $wrappedKeyLen
+    $ephPubKey = Get-ByteRange -Source $Bytes -Offset $offset -Length $ephPubKeyLen
+    $offset += $ephPubKeyLen
     $nonce = Get-ByteRange -Source $Bytes -Offset $offset -Length $Script:NonceLength
     $offset += $Script:NonceLength
     $tag = Get-ByteRange -Source $Bytes -Offset $offset -Length $Script:TagLength
@@ -431,7 +487,7 @@ function ConvertFrom-CtxtContainer {
     $ciphertext = Get-ByteRange -Source $Bytes -Offset $offset -Length $ciphertextLen
 
     return [pscustomobject]@{
-        WrappedKey = $wrappedKey
+        EphPubKey  = $ephPubKey
         Nonce      = $nonce
         Tag        = $tag
         Ciphertext = $ciphertext
@@ -514,13 +570,13 @@ function Get-CtxtPrivateKey {
 
     $pemText = [System.IO.File]::ReadAllText($KeyFilePath)
 
-    $rsa = [System.Security.Cryptography.RSA]::Create()
+    $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
     try {
         if ($pemText -match 'ENCRYPTED PRIVATE KEY') {
             $securePwd = Read-Host -Prompt '私鑰已加密，請輸入密碼' -AsSecureString
             $plainPwd = [System.Net.NetworkCredential]::new('', $securePwd).Password
             try {
-                $rsa.ImportFromEncryptedPem($pemText, $plainPwd)
+                $ecdh.ImportFromEncryptedPem($pemText, $plainPwd)
             }
             catch {
                 throw "私鑰解密失敗：密碼錯誤，或私鑰檔案已損壞（$($_.Exception.Message)）"
@@ -531,7 +587,7 @@ function Get-CtxtPrivateKey {
         }
         else {
             try {
-                $rsa.ImportFromPem($pemText)
+                $ecdh.ImportFromPem($pemText)
             }
             catch {
                 throw "私鑰讀不到或解不開：PEM 格式無效或檔案已損壞（$($_.Exception.Message)）"
@@ -539,11 +595,11 @@ function Get-CtxtPrivateKey {
         }
     }
     catch {
-        $rsa.Dispose()
+        $ecdh.Dispose()
         throw
     }
 
-    return $rsa
+    return $ecdh
 }
 
 # ==========================================================================
@@ -576,13 +632,16 @@ function Invoke-CtxtUnpack {
 
     $parsed = ConvertFrom-CtxtContainer -Bytes $containerBytes
 
-    $rsa = Get-CtxtPrivateKey -KeyFilePath $KeyFilePath
+    $ecdh = Get-CtxtPrivateKey -KeyFilePath $KeyFilePath
     try {
-        $aesKey = Unprotect-CtxtAesKey -WrappedKey $parsed.WrappedKey -Rsa $rsa
+        $sharedSecret = Get-CtxtSharedSecretForDecrypt -EphPubKeyDer $parsed.EphPubKey -OwnPrivateKey $ecdh
     }
     finally {
-        $rsa.Dispose()
+        $ecdh.Dispose()
     }
+    $infoBytes = Get-CtxtHkdfInfo -EphPubKeyDer $parsed.EphPubKey
+    $aesKey = Get-CtxtDerivedAesKey -SharedSecret $sharedSecret -Nonce $parsed.Nonce -InfoBytes $infoBytes
+    [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
     try {
         $plain = [byte[]]::new($parsed.Ciphertext.Length)
@@ -632,30 +691,30 @@ function Invoke-CtxtGenerateKeys {
         New-Item -ItemType Directory -Path $Script:DefaultKeyDir -Force | Out-Null
     }
 
-    Write-Host '產生 RSA-4096 金鑰對中，請稍候...'
-    $rsa = [System.Security.Cryptography.RSA]::Create(4096)
+    Write-Host '產生 ECDH P-256 金鑰對中，請稍候...'
+    $ecdh = New-CtxtEcdhKeyPair
     try {
         $securePwd = Read-Host -Prompt '設定私鑰保護密碼（可留空，直接按 Enter 略過＝不加密私鑰）' -AsSecureString
         $plainPwd = [System.Net.NetworkCredential]::new('', $securePwd).Password
 
         if ([string]::IsNullOrEmpty($plainPwd)) {
-            $privatePem = $rsa.ExportPkcs8PrivateKeyPem()
+            $privatePem = $ecdh.ExportPkcs8PrivateKeyPem()
         }
         else {
             $pbeParams = [System.Security.Cryptography.PbeParameters]::new(
                 [System.Security.Cryptography.PbeEncryptionAlgorithm]::Aes256Cbc,
                 [System.Security.Cryptography.HashAlgorithmName]::SHA256,
                 600000)
-            $privatePem = $rsa.ExportEncryptedPkcs8PrivateKeyPem($plainPwd, $pbeParams)
+            $privatePem = $ecdh.ExportEncryptedPkcs8PrivateKeyPem($plainPwd, $pbeParams)
         }
         $plainPwd = $null
 
         [System.IO.File]::WriteAllText($Script:DefaultKeyFile, $privatePem)
 
-        $publicPem = $rsa.ExportSubjectPublicKeyInfoPem()
+        $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
     }
     finally {
-        $rsa.Dispose()
+        $ecdh.Dispose()
     }
 
     Write-Host ''
