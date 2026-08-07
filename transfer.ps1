@@ -152,13 +152,14 @@ function Get-CtxtPackPlan {
         }
     }
     elseif (Test-Path -LiteralPath $PackPath -PathType Container) {
-        # --- 資料夾：遞迴整包，保留子目錄結構 ---
+        # --- 資料夾：遞迴整包，保留子目錄結構（含空子目錄） ---
         $root = (Get-Item -LiteralPath $PackPath).FullName.TrimEnd('\', '/')
         $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)
-        if ($files.Count -eq 0) {
+        $allDirs = @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force)
+        if ($files.Count -eq 0 -and $allDirs.Count -eq 0) {
             throw "資料夾內沒有可打包的檔案：$PackPath"
         }
-        $entries = foreach ($f in $files) {
+        $fileEntries = foreach ($f in $files) {
             $rel = $f.FullName.Substring($root.Length + 1) -replace '\\', '/'
             [pscustomobject]@{
                 EntryName   = $rel
@@ -166,8 +167,21 @@ function Get-CtxtPackPlan {
                 IsDirectory = $false
             }
         }
+        # 空子目錄（本身及遞迴子孫都不含任何檔案）額外列舉成目錄 entry，
+        # 讓 -Unpack 端可以還原出空的目錄結構，而不是被靜默丟棄。
+        $emptyDirEntries = foreach ($d in $allDirs) {
+            $hasAnyFile = @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force).Count -gt 0
+            if (-not $hasAnyFile) {
+                $rel = $d.FullName.Substring($root.Length + 1) -replace '\\', '/'
+                [pscustomobject]@{
+                    EntryName   = $rel
+                    SourcePath  = $null
+                    IsDirectory = $true
+                }
+            }
+        }
         return [pscustomobject]@{
-            Entries         = @($entries)
+            Entries         = @($fileEntries) + @($emptyDirEntries)
             DefaultBaseName = (Split-Path -Path $root -Leaf)
         }
     }
@@ -189,7 +203,7 @@ function Get-CtxtPackPlan {
 }
 
 function New-CtxtZipBytes {
-    <# 依項目清單建立 ZIP（store，UTF-8 檔名），回傳位元組陣列。輸出只含實際檔案。 #>
+    <# 依項目清單建立 ZIP（store，UTF-8 檔名），回傳位元組陣列。含資料夾模式列舉的空目錄 entry。 #>
     param([object[]] $Entries)
 
     $ms = [System.IO.MemoryStream]::new()
@@ -197,6 +211,11 @@ function New-CtxtZipBytes {
         $ms, [System.IO.Compression.ZipArchiveMode]::Create, $true, [System.Text.Encoding]::UTF8)
     try {
         foreach ($e in $Entries) {
+            if ($e.IsDirectory) {
+                $dirName = ($e.EntryName -replace '\\', '/').TrimEnd('/') + '/'
+                [void]$zip.CreateEntry($dirName, [System.IO.Compression.CompressionLevel]::NoCompression)
+                continue
+            }
             $entry = $zip.CreateEntry($e.EntryName, [System.IO.Compression.CompressionLevel]::NoCompression)
             $entryStream = $entry.Open()
             try {
