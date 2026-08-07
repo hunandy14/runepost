@@ -356,7 +356,198 @@ function Invoke-CtxtPack {
 }
 
 # ==========================================================================
-# 區塊：-Unpack 主流程（骨架，待下一個里程碑實作）
+# 區塊：解壓（Brotli）— 解壓方向
+# ==========================================================================
+
+function Expand-CtxtBrotli {
+    param([byte[]] $InputBytes)
+    $inMs = [System.IO.MemoryStream]::new($InputBytes)
+    $outMs = [System.IO.MemoryStream]::new()
+    $brotli = [System.IO.Compression.BrotliStream]::new(
+        $inMs, [System.IO.Compression.CompressionMode]::Decompress, $false)
+    try {
+        $brotli.CopyTo($outMs)
+    }
+    finally {
+        $brotli.Dispose()
+    }
+    return , $outMs.ToArray()
+}
+
+# ==========================================================================
+# 區塊：解密 — 解密方向
+# ==========================================================================
+
+function Unprotect-CtxtAesKey {
+    <# 用 RSA 私鑰解開 AES 金鑰包裹 #>
+    param(
+        [byte[]] $WrappedKey,
+        [System.Security.Cryptography.RSA] $Rsa
+    )
+    try {
+        return $Rsa.Decrypt($WrappedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+    }
+    catch {
+        throw "AES 金鑰解密失敗：私鑰與加密所用的公鑰不匹配，或私鑰檔案已損壞（$($_.Exception.Message)）"
+    }
+}
+
+# ==========================================================================
+# 區塊：容器二進位格式解析
+# ==========================================================================
+
+function ConvertFrom-CtxtContainer {
+    param([byte[]] $Bytes)
+
+    $headerMin = 4 + 1 + 2
+    if ($Bytes.Length -lt $headerMin) {
+        throw '容器格式錯誤：檔頭長度不足，檔案可能已損壞或被截斷'
+    }
+
+    $magic = [System.Text.Encoding]::ASCII.GetString($Bytes, 0, 4)
+    if ($magic -ne $Script:CtxtMagic) {
+        throw "容器格式錯誤：檔頭 magic 不符（讀到 '$magic'），此檔案可能不是本工具產生的密文"
+    }
+
+    $version = $Bytes[4]
+    if ($version -ne $Script:CtxtVersion) {
+        throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:CtxtVersion)"
+    }
+
+    $wrappedKeyLen = [BitConverter]::ToUInt16($Bytes, 5)
+    $offset = 7
+    $minTotal = $offset + $wrappedKeyLen + $Script:NonceLength + $Script:TagLength
+    if ($Bytes.Length -lt $minTotal) {
+        throw '容器格式錯誤：長度不足以包含完整的金鑰／nonce／tag，檔案可能已損壞或被截斷'
+    }
+
+    $wrappedKey = Get-ByteRange -Source $Bytes -Offset $offset -Length $wrappedKeyLen
+    $offset += $wrappedKeyLen
+    $nonce = Get-ByteRange -Source $Bytes -Offset $offset -Length $Script:NonceLength
+    $offset += $Script:NonceLength
+    $tag = Get-ByteRange -Source $Bytes -Offset $offset -Length $Script:TagLength
+    $offset += $Script:TagLength
+    $ciphertextLen = $Bytes.Length - $offset
+    $ciphertext = Get-ByteRange -Source $Bytes -Offset $offset -Length $ciphertextLen
+
+    return [pscustomobject]@{
+        WrappedKey = $wrappedKey
+        Nonce      = $nonce
+        Tag        = $tag
+        Ciphertext = $ciphertext
+    }
+}
+
+# ==========================================================================
+# 區塊：ZIP 解包
+# ==========================================================================
+
+function Expand-CtxtZip {
+    <# 將 ZIP 位元組解開到目的資料夾（手動走 stream，防 zip-slip） #>
+    param(
+        [byte[]] $ZipBytes,
+        [string] $Destination
+    )
+
+    $ms = [System.IO.MemoryStream]::new($ZipBytes)
+    try {
+        $zip = [System.IO.Compression.ZipArchive]::new(
+            $ms, [System.IO.Compression.ZipArchiveMode]::Read, $false, [System.Text.Encoding]::UTF8)
+        try {
+            $destRoot = (New-Item -ItemType Directory -Path $Destination -Force).FullName
+            foreach ($entry in $zip.Entries) {
+                if ($entry.FullName -match '(^|/)\.\.(/|$)' -or [System.IO.Path]::IsPathRooted($entry.FullName)) {
+                    throw "ZIP 內含不安全的路徑項目：$($entry.FullName)"
+                }
+                $relPath = $entry.FullName -replace '/', [System.IO.Path]::DirectorySeparatorChar
+                $destPath = Join-Path -Path $destRoot -ChildPath $relPath
+
+                if ($entry.FullName.EndsWith('/')) {
+                    New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+                    continue
+                }
+
+                $destDir = Split-Path -Path $destPath -Parent
+                if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                }
+
+                $entryStream = $entry.Open()
+                try {
+                    $outStream = [System.IO.File]::Create($destPath)
+                    try {
+                        $entryStream.CopyTo($outStream)
+                    }
+                    finally {
+                        $outStream.Dispose()
+                    }
+                }
+                finally {
+                    $entryStream.Dispose()
+                }
+            }
+        }
+        finally {
+            $zip.Dispose()
+        }
+    }
+    finally {
+        $ms.Dispose()
+    }
+}
+
+# ==========================================================================
+# 區塊：私鑰載入（-Unpack 用；-GenerateKeys 的產生流程於下一個里程碑實作）
+# ==========================================================================
+
+function Get-CtxtPrivateKey {
+    <# 載入私鑰 PEM；若為加密 PEM 則互動詢問密碼（Read-Host -AsSecureString） #>
+    param([string] $KeyFilePath)
+
+    if ([string]::IsNullOrWhiteSpace($KeyFilePath)) {
+        $KeyFilePath = $Script:DefaultKeyFile
+    }
+
+    if (-not (Test-Path -LiteralPath $KeyFilePath -PathType Leaf)) {
+        throw "私鑰檔案讀取失敗：找不到 $KeyFilePath（請確認路徑，或先以 -GenerateKeys 產生金鑰）"
+    }
+
+    $pemText = [System.IO.File]::ReadAllText($KeyFilePath)
+
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    try {
+        if ($pemText -match 'ENCRYPTED PRIVATE KEY') {
+            $securePwd = Read-Host -Prompt '私鑰已加密，請輸入密碼' -AsSecureString
+            $plainPwd = [System.Net.NetworkCredential]::new('', $securePwd).Password
+            try {
+                $rsa.ImportFromEncryptedPem($pemText, $plainPwd)
+            }
+            catch {
+                throw "私鑰解密失敗：密碼錯誤，或私鑰檔案已損壞（$($_.Exception.Message)）"
+            }
+            finally {
+                $plainPwd = $null
+            }
+        }
+        else {
+            try {
+                $rsa.ImportFromPem($pemText)
+            }
+            catch {
+                throw "私鑰讀不到或解不開：PEM 格式無效或檔案已損壞（$($_.Exception.Message)）"
+            }
+        }
+    }
+    catch {
+        $rsa.Dispose()
+        throw
+    }
+
+    return $rsa
+}
+
+# ==========================================================================
+# 區塊：-Unpack 主流程
 # ==========================================================================
 
 function Invoke-CtxtUnpack {
@@ -365,7 +556,67 @@ function Invoke-CtxtUnpack {
         [string] $DestinationPath,
         [string] $KeyFilePath
     )
-    throw '尚未實作：-Unpack'
+
+    if (-not (Test-Path -LiteralPath $InFilePath -PathType Leaf)) {
+        throw "找不到輸入檔案：$InFilePath"
+    }
+
+    $rawText = [System.IO.File]::ReadAllText($InFilePath)
+    $cleaned = ($rawText -replace '\s', '')
+    if ([string]::IsNullOrEmpty($cleaned)) {
+        throw '輸入檔案內容為空，無法解析'
+    }
+
+    try {
+        $containerBytes = [Convert]::FromBase64String($cleaned)
+    }
+    catch {
+        throw "Base64 解碼失敗：檔案內容可能已損壞或被截斷（$($_.Exception.Message)）"
+    }
+
+    $parsed = ConvertFrom-CtxtContainer -Bytes $containerBytes
+
+    $rsa = Get-CtxtPrivateKey -KeyFilePath $KeyFilePath
+    try {
+        $aesKey = Unprotect-CtxtAesKey -WrappedKey $parsed.WrappedKey -Rsa $rsa
+    }
+    finally {
+        $rsa.Dispose()
+    }
+
+    try {
+        $plain = [byte[]]::new($parsed.Ciphertext.Length)
+        $aesGcm = [System.Security.Cryptography.AesGcm]::new($aesKey, $Script:TagLength)
+        try {
+            $aesGcm.Decrypt($parsed.Nonce, $parsed.Ciphertext, $parsed.Tag, $plain)
+        }
+        finally {
+            $aesGcm.Dispose()
+            [Array]::Clear($aesKey, 0, $aesKey.Length)
+        }
+    }
+    catch [System.Security.Cryptography.AuthenticationTagMismatchException] {
+        throw '內容驗證失敗（GCM 認證標籤不符）：檔案在傳輸過程中可能被竄改或損壞'
+    }
+    catch {
+        throw "GCM 解密失敗：內容可能已損壞（$($_.Exception.Message)）"
+    }
+
+    try {
+        $zipBytes = Expand-CtxtBrotli -InputBytes $plain
+    }
+    catch {
+        throw "Brotli 解壓縮失敗：資料可能已損壞（$($_.Exception.Message)）"
+    }
+
+    try {
+        Expand-CtxtZip -ZipBytes $zipBytes -Destination $DestinationPath
+    }
+    catch {
+        throw "ZIP 解包失敗：封裝格式錯誤或已損壞（$($_.Exception.Message)）"
+    }
+
+    Write-Host "解密完成，檔案已還原至：$((Get-Item -LiteralPath $DestinationPath).FullName)"
 }
 
 # ==========================================================================
