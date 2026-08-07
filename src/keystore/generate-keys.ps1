@@ -39,5 +39,5 @@ function Invoke-RuneGenerateKeys {
     Write-Host '此檔案只有在這台機器、這個 Windows 帳號下才解得開；請自行備份，'
     Write-Host '遺失或搬到別的機器／帳號，將無法解密任何已用對應公鑰加密的檔案。'
     Write-Host ''
-    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer
+    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer -PublicKeyFilePath $Script:DefaultPublicKeyFile
 }

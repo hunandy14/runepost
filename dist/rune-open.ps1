@@ -1,5 +1,5 @@
 ﻿# 本檔由 build.ps1 自 src/ 組裝產生，請勿直接編輯 —— 請改 src/ 後重跑 build.ps1
-# source-digest: 25fd8a013860
+# source-digest: bafc35e072bb
 # format: RUNE v2
 # product: rune-open
 # fragments: 19
@@ -580,12 +580,17 @@ function Invoke-RuneOpen {
 # ==========================================================================
 
 function Write-RunePublicKeyBlock {
-    <# 統一的公鑰輸出格式：PEM 全文 + 指紋。兩端要比對的就是這個指紋，所以格式必須一致。 #>
+    <#
+        統一的公鑰輸出格式：PEM 全文 + 指紋。兩端要比對的就是這個指紋，所以格式必須一致。
+        -PublicKeyFilePath 由呼叫端明確傳入實際寫入的路徑（而非在這裡假設一定是預設
+        路徑）——-ExportPublicKey 用非預設 -KeyFile 時會寫到私鑰同目錄，不是預設位置。
+    #>
     param(
         [string] $PublicPem,
-        [byte[]] $SpkiDer
+        [byte[]] $SpkiDer,
+        [string] $PublicKeyFilePath
     )
-    Write-Host "公鑰已寫入：$($Script:DefaultPublicKeyFile)"
+    Write-Host "公鑰已寫入：$PublicKeyFilePath"
     Write-Host '請把這個檔案（或以下 PEM 全文）交給加密端，放到該機器的 ~\.rune\public.pem。'
     Write-Host ''
     Write-Host '===== 公鑰 PEM（加密端使用）====='
@@ -635,16 +640,24 @@ function Invoke-RuneGenerateKeys {
     Write-Host '此檔案只有在這台機器、這個 Windows 帳號下才解得開；請自行備份，'
     Write-Host '遺失或搬到別的機器／帳號，將無法解密任何已用對應公鑰加密的檔案。'
     Write-Host ''
-    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer
+    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer -PublicKeyFilePath $Script:DefaultPublicKeyFile
 }
 
 function Invoke-RuneExportPublicKey {
     <#
-        從既有私鑰重新導出公鑰並「自由覆寫」public.pem。
+        從既有私鑰重新導出公鑰。
 
         存在的必要性：public.pem 由 private.key 可完全重現，因此不珍貴、覆寫無風險；
         但 -GenerateKeys 在私鑰存在時一律拒絕，沒有這個模式的話，使用者一旦刪掉或
         遺失 public.pem 就再也生不回來。兼作「再印一次我的指紋」的工具。
+
+        輸出路徑跟著私鑰走，不永遠寫死預設位置：
+          - 未指定 -KeyFile（即沿用預設 ~\.rune\private.key）→ 寫回預設的
+            ~\.rune\public.pem，與 -GenerateKeys 的行為一致。
+          - 指定了非預設的 -KeyFile → 寫到「該私鑰檔所在目錄」下的 public.pem，
+            不去動預設的 public.pem。理由：這裡的「覆寫無風險」只對「這把私鑰
+            對應的公鑰檔」成立；拿一把備用／次要私鑰導出，若仍寫回預設路徑，
+            會靜默覆蓋主金鑰的 public.pem，讓加密端此後預設加密給錯的收件人。
     #>
     param([string] $KeyFilePath)
 
@@ -657,13 +670,30 @@ function Invoke-RuneExportPublicKey {
         $ecdh.Dispose()
     }
 
-    if (-not (Test-Path -LiteralPath $Script:DefaultKeyDir)) {
-        New-Item -ItemType Directory -Path $Script:DefaultKeyDir -Force | Out-Null
+    $effectiveKeyPath = if ([string]::IsNullOrWhiteSpace($KeyFilePath)) { $Script:DefaultKeyFile } else { $KeyFilePath }
+    $isDefaultKey = ([System.IO.Path]::GetFullPath($effectiveKeyPath) -eq [System.IO.Path]::GetFullPath($Script:DefaultKeyFile))
+
+    if ($isDefaultKey) {
+        $outDir = $Script:DefaultKeyDir
+        $outFile = $Script:DefaultPublicKeyFile
     }
-    [System.IO.File]::WriteAllText($Script:DefaultPublicKeyFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
+    else {
+        $outDir = Split-Path -Path ([System.IO.Path]::GetFullPath($effectiveKeyPath)) -Parent
+        $outFile = Join-Path -Path $outDir -ChildPath 'public.pem'
+    }
+
+    if (-not (Test-Path -LiteralPath $outDir)) {
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText($outFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
 
     Write-Host ''
-    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer
+    if (-not $isDefaultKey) {
+        Write-Host "使用了非預設私鑰：$effectiveKeyPath"
+        Write-Host "公鑰已寫到同目錄，未動到預設的 $($Script:DefaultPublicKeyFile)。"
+        Write-Host ''
+    }
+    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer -PublicKeyFilePath $outFile
 }
 # ==========================================================================
 # 進入點
