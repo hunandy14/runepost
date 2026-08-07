@@ -116,7 +116,8 @@ function Get-CtxtPackPlan {
     param([string] $PackPath)
 
     if ($PackPath -match '[*?]') {
-        # --- wildcard：Get-Item 展開，僅當層不遞迴 ---
+        # --- wildcard：Get-Item 展開，僅當層不遞迴。wildcard 命中的子目錄一律
+        #     略過並警告（不遞迴打包目錄），不再靜默把目錄當空 entry 塞進封存包。
         $items = @(Get-Item -Path $PackPath -ErrorAction SilentlyContinue)
         if ($items.Count -eq 0) {
             throw "找不到符合萬用字元的項目：$PackPath"
@@ -128,11 +129,21 @@ function Get-CtxtPackPlan {
         else {
             $parent = (Resolve-Path -LiteralPath $parent).Path
         }
-        $entries = foreach ($item in $items) {
+        $fileItems = @(foreach ($item in $items) {
+            if ($item.PSIsContainer) {
+                Write-Warning "wildcard 不遞迴，已略過目錄：$($item.Name)"
+                continue
+            }
+            $item
+        })
+        if ($fileItems.Count -eq 0) {
+            throw "找不到符合萬用字元的項目：$PackPath（僅匹配到目錄，wildcard 不遞迴打包目錄）"
+        }
+        $entries = foreach ($item in $fileItems) {
             [pscustomobject]@{
                 EntryName   = $item.Name
                 SourcePath  = $item.FullName
-                IsDirectory = $item.PSIsContainer
+                IsDirectory = $false
             }
         }
         return [pscustomobject]@{
@@ -178,7 +189,7 @@ function Get-CtxtPackPlan {
 }
 
 function New-CtxtZipBytes {
-    <# 依項目清單建立 ZIP（store，UTF-8 檔名），回傳位元組陣列 #>
+    <# 依項目清單建立 ZIP（store，UTF-8 檔名），回傳位元組陣列。輸出只含實際檔案。 #>
     param([object[]] $Entries)
 
     $ms = [System.IO.MemoryStream]::new()
@@ -186,11 +197,6 @@ function New-CtxtZipBytes {
         $ms, [System.IO.Compression.ZipArchiveMode]::Create, $true, [System.Text.Encoding]::UTF8)
     try {
         foreach ($e in $Entries) {
-            if ($e.IsDirectory) {
-                $dirName = ($e.EntryName -replace '\\', '/').TrimEnd('/') + '/'
-                [void]$zip.CreateEntry($dirName, [System.IO.Compression.CompressionLevel]::NoCompression)
-                continue
-            }
             $entry = $zip.CreateEntry($e.EntryName, [System.IO.Compression.CompressionLevel]::NoCompression)
             $entryStream = $entry.Open()
             try {
