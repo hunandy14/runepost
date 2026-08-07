@@ -1,0 +1,4 @@
+# verify.ps1 執行時產生的沙箱與報表（非交付物，不進版控）
+tests/_work/
+tests/verify-report.txt
+tests/verify-log.txt
