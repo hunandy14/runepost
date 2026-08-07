@@ -195,7 +195,7 @@ function Invoke-Transfer {
 # 錯誤訊息「指明環節」的關鍵字（中英雙語，避免語系造成偽陰性）
 $script:ErrPatterns = @{
     base64  = 'base64|Base64|BASE64|編碼|解碼|encod|decod'
-    format  = 'magic|CTXT|格式|標頭|檔頭|header|不符|無法辨識|not a valid|不是|無效'
+    format  = 'magic|RUNE|格式|標頭|檔頭|header|不符|無法辨識|not a valid|不是|無效'
     version = '版本|version|不支援|unsupported|0x0|格式|magic'
     key     = '私鑰|金鑰|key|解鑰|DPAPI|解不開|讀不到|無法讀取|無法解密|not found|decrypt|unprotect'
     tag     = '損壞|竄改|corrupt|tamper|驗證失敗|校驗|完整性|tag|GCM|authentication|內容'
@@ -448,16 +448,16 @@ function Get-KdfCandidates {
         'empty'  = [byte[]]@()
         'nonce'  = $Container.Nonce
         'epk'    = $Container.Epk
-        'magic'  = $u.GetBytes('CTXT')
+        'magic'  = $u.GetBytes('RUNE')
         'header' = [byte[]]($Container.Bytes[0..($Container.HeaderSize - 1)])
     }
     $infos = [ordered]@{
         'null'    = $null
         'empty'   = [byte[]]@()
-        'CTXT'    = $u.GetBytes('CTXT')
-        'CTXTv2'  = $u.GetBytes('CTXTv2')
-        'CTXT-v2' = $u.GetBytes('CTXT-v2')
-        'lowerctxt' = $u.GetBytes('ctxt')
+        'RUNE'    = $u.GetBytes('RUNE')
+        'RUNEv2'  = $u.GetBytes('RUNEv2')
+        'RUNE-v2' = $u.GetBytes('RUNE-v2')
+        'lowerrune' = $u.GetBytes('rune')
         'aesgcm'  = $u.GetBytes('AES-256-GCM')
         'key'     = $u.GetBytes('key')
         'magicver' = [byte[]]($Container.Bytes[0..4])
@@ -585,13 +585,13 @@ function New-HomeSandbox {
             APPDATA     = (New-Dir (Join-Path $dir 'AppData\Roaming'))
             LOCALAPPDATA = (New-Dir (Join-Path $dir 'AppData\Local'))
         }
-        KeyPath = (Join-Path $dir '.ctxt\private.key')
+        KeyPath = (Join-Path $dir '.rune\private.key')
     }
 }
 
 # 使用者真實家目錄的保護：偵測沙箱逃逸
-$script:RealCtxtDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ctxt'
-$script:RealKeyPath = Join-Path $script:RealCtxtDir 'private.key'
+$script:RealRuneDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.rune'
+$script:RealKeyPath = Join-Path $script:RealRuneDir 'private.key'
 $script:RealKeyExisted = [System.IO.File]::Exists($script:RealKeyPath)
 $script:RealKeyHash = if ($script:RealKeyExisted) { Get-Sha $script:RealKeyPath } else { $null }
 $script:EscapeNotes = @()
@@ -707,7 +707,7 @@ Invoke-Case 'P2' '$PublicKeyPem 常數存在且原值為空' {
     return ('行 {0}，初值 {1}' -f $f.Hit.Extent.StartLineNumber, (Squash $val 24))
 }
 
-Invoke-Case 'P3' '家目錄沙箱可用（不污染真實 ~\.ctxt）' {
+Invoke-Case 'P3' '家目錄沙箱可用（不污染真實 ~\.rune）' {
     $sb = New-HomeSandbox -Name 'probe'
     $probe = Join-Path $script:Work 'homeprobe.ps1'
     [System.IO.File]::WriteAllText($probe, '"H=$HOME"; "T=" + (Resolve-Path ~).ProviderPath; "U=$env:USERPROFILE"', $script:Utf8Bom)
@@ -720,7 +720,7 @@ Invoke-Case 'P3' '家目錄沙箱可用（不污染真實 ~\.ctxt）' {
 Invoke-Case 'P4' '受測物 -GenerateKeys 產生測試金鑰 A' {
     Assert ($null -ne $script:Sut) '前置 P1 未通過'
     $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:Sut
-    Assert ($script:KeyA.HasKey) ('未在 ~\.ctxt\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
+    Assert ($script:KeyA.HasKey) ('未在 ~\.rune\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
     Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未印出 PUBLIC KEY PEM 區塊；輸出=' + (Squash $script:KeyA.Result.All 160))
     $script:PubPemA = $script:KeyA.PublicPem
     $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
@@ -852,7 +852,7 @@ function New-ZipWithDirEntry {
 }
 
 # 以受測物的收件人公鑰 + C08 還原出的 KDF 參數，偽造一個「密碼學上完全合法」的容器
-function New-ForgedCtxt {
+function New-ForgedRune {
     param([byte[]]$ZipBytes, [string]$Path)
     Assert ($null -ne $script:KdfInfo) '需 C08 還原 KDF 參數'
     $plain = Compress-Brotli -Data $ZipBytes
@@ -865,7 +865,7 @@ function New-ForgedCtxt {
     $nonce = [byte[]]::new(12); [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
 
     $hdr = [System.Collections.Generic.List[byte]]::new()
-    $hdr.AddRange([System.Text.Encoding]::ASCII.GetBytes('CTXT'))
+    $hdr.AddRange([System.Text.Encoding]::ASCII.GetBytes('RUNE'))
     $hdr.Add(2)
     $hdr.Add([byte]($epk.Length -band 0xFF)); $hdr.Add([byte](($epk.Length -shr 8) -band 0xFF))
     $hdr.AddRange($epk)
@@ -946,7 +946,7 @@ else {
     Invoke-Case 'C04' '容器結構：magic/version=0x02/ephPubKeyLen/各段偏移自洽' {
         Assert ($null -ne $script:CtTree) 'C03 未產生容器'
         $c = Read-Container $script:CtTree
-        Assert ($c.Magic -eq 'CTXT') ("magic 不是 CTXT：'{0}'" -f $c.Magic)
+        Assert ($c.Magic -eq 'RUNE') ("magic 不是 RUNE：'{0}'" -f $c.Magic)
         Assert ($c.Version -eq 2) ('version 不是 0x02：0x{0:X2}' -f $c.Version)
         Assert ($c.EpkLen -ge 80 -and $c.EpkLen -le 120) ('ephPubKeyLen 不在 80~120：{0}' -f $c.EpkLen)
         Assert ($c.Epk[0] -eq 0x30) ('ephemeral 公鑰非 DER SEQUENCE 開頭：0x{0:X2}' -f $c.Epk[0])
@@ -955,7 +955,7 @@ else {
         Assert ($c.Cipher.Length -gt 0) 'ciphertext 為空'
         $expLen = 7 + $c.EpkLen + 12 + 16 + $c.Cipher.Length
         Assert ($expLen -eq $c.Bytes.Length) "長度不自洽：$expLen vs $($c.Bytes.Length)"
-        return ('magic=CTXT ver=0x02 epkLen={0}(uint16 LE) der=0x30 nonce@{1} tag@{2} ct={3}B 總長自洽' -f `
+        return ('magic=RUNE ver=0x02 epkLen={0}(uint16 LE) der=0x30 nonce@{1} tag@{2} ct={3}B 總長自洽' -f `
                 $c.EpkLen, (7 + $c.EpkLen), (7 + $c.EpkLen + 12), $c.Cipher.Length)
     }
 
@@ -1086,7 +1086,7 @@ else {
         $t = Write-Container -Bytes $b -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'tamper_magic.txt')
         $r = Invoke-UnpackOnly -Txt $t -KeyFile $script:KeyA.KeyPath -DestName 'tamper_magic'
         $ev = Expect-Failure $r 'format' '竄改 magic'
-        return ("magic 'CTXT'→'XTXT'；$ev")
+        return ("magic 'RUNE'→'XUNE'；$ev")
     }
 
     Invoke-Case 'C14' '竄改 version(0x02→0x09) → 報版本不符' {
@@ -1097,6 +1097,31 @@ else {
         $r = Invoke-UnpackOnly -Txt $t -KeyFile $script:KeyA.KeyPath -DestName 'tamper_ver'
         $ev = Expect-Failure $r 'version' '竄改 version'
         return ("version 0x02→0x09；$ev")
+    }
+
+    Invoke-Case 'C50' '新舊格式互斥：舊 CTXT 容器須以 magic 不符被拒' {
+        # 舊工具的 CTXT v2 與本工具的 RUNE v2 沿用同一個 version 編號，兩者只靠 magic 互斥。
+        # magic 檢查排在 version 檢查與所有金鑰操作之前，因此本案不需要能解開該容器的私鑰，
+        # 直接以硬編碼的舊格式 header 樣板構造即可（可在任何機器重現）。
+        $epkLen = 91
+        $b = [System.Collections.Generic.List[byte]]::new()
+        $b.AddRange([System.Text.Encoding]::ASCII.GetBytes('CTXT'))
+        $b.Add(2)
+        $b.Add([byte]($epkLen -band 0xFF)); $b.Add([byte](($epkLen -shr 8) -band 0xFF))
+        $body = [byte[]]::new($epkLen + 12 + 16 + 64)   # ephPubKey + nonce + tag + ciphertext
+        [System.Security.Cryptography.RandomNumberGenerator]::Fill($body)
+        $body[0] = 0x30                                  # 讓 ephPubKey 至少像 DER SEQUENCE
+        $b.AddRange($body)
+        $t = Write-Container -Bytes $b.ToArray() -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'legacy_ctxt.txt')
+
+        $r = Invoke-UnpackOnly -Txt $t -KeyFile $script:KeyA.KeyPath -DestName 'legacy_ctxt'
+        Assert (-not $r.TimedOut) '舊 CTXT 容器導致子行程卡住'
+        Assert ($r.ExitCode -eq 1) ('舊 CTXT 容器應以 exit 1 被拒絕，實際 exit={0}：{1}' -f $r.ExitCode, (Squash $r.All 160))
+        $ev = Expect-Failure $r 'format' '舊 CTXT 容器'
+        Assert ($r.All -match 'CTXT') ('訊息未回報實際讀到的 magic（應含 CTXT）：' + (Squash $r.All 200))
+        $dest = Join-Path $script:Work 'unpack\legacy_ctxt'
+        Assert ((Get-TreeMap $dest).Count -eq 0) '舊格式被拒卻仍寫出了檔案'
+        return ("舊 CTXT v2 容器遭 magic 檢查拒絕、Destination 乾淨；$ev")
     }
 
     Invoke-Case 'C15' '錯誤私鑰（另一組 P-256 blob）→ 報解鑰失敗' {
@@ -1183,7 +1208,7 @@ else {
         [void](Expect-Success $r 'Pack -Force')
         Assert ((Get-Sha $out) -ne $before) '-Force 未覆蓋'
         $c = Read-Container $out
-        Assert ($c.Magic -eq 'CTXT' -and $c.Version -eq 2) '覆蓋後不是合法容器'
+        Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2) '覆蓋後不是合法容器'
         return ('已覆蓋並產生合法容器 {0}B' -f $c.Bytes.Length)
     }
 
@@ -1229,7 +1254,7 @@ else {
         }
         Assert ($null -ne $found) ("找不到預設輸出 '$Expected'（已找 cwd / 輸入所在目錄 / 其上層）；stdout=" + (Squash $r.StdOut 120))
         $c = Read-Container $found
-        Assert ($c.Magic -eq 'CTXT' -and $c.Version -eq 2) '預設輸出不是合法容器'
+        Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2) '預設輸出不是合法容器'
         $where = if ($found.StartsWith($cwd)) { '目前目錄' } else { '輸入所在位置' }
         return ("產生 $Expected（$where），{0}B" -f $c.Bytes.Length)
     }
@@ -1298,10 +1323,10 @@ else {
         return ('DPAPI blob 解鑰成功，還原 3 檔')
     }
 
-    Invoke-Case 'C33' '-KeyFile 預設值 ~\.ctxt\private.key（不給 -KeyFile 也能解）' {
+    Invoke-Case 'C33' '-KeyFile 預設值 ~\.rune\private.key（不給 -KeyFile 也能解）' {
         $dest = New-Dir (Join-Path $script:Work 'unpack\defaultkey')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-        $expected = Join-Path $script:KeyA.Sandbox.Path '.ctxt\private.key'
+        $expected = Join-Path $script:KeyA.Sandbox.Path '.rune\private.key'
         if (-not [System.IO.File]::Exists($expected)) {
             [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($expected))
             [System.IO.File]::Copy($script:KeyA.KeyPath, $expected, $true)
@@ -1309,7 +1334,7 @@ else {
         $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest) -EnvVars $script:KeyA.Sandbox.Env
         [void](Expect-Success $r 'Unpack(預設 KeyFile)')
         Assert ((Get-TreeMap $dest).Count -eq 3) '解出檔案數不符'
-        return ('未指定 -KeyFile，從 ~\.ctxt\private.key 讀取成功')
+        return ('未指定 -KeyFile，從 ~\.rune\private.key 讀取成功')
     }
 
     Invoke-Case 'C34' '-GenerateKeys 私鑰已存在時拒絕覆蓋' {
@@ -1359,7 +1384,7 @@ else {
         $nonce = [byte[]]::new(12); [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
 
         $hdr = [System.Collections.Generic.List[byte]]::new()
-        $hdr.AddRange([System.Text.Encoding]::ASCII.GetBytes('CTXT'))
+        $hdr.AddRange([System.Text.Encoding]::ASCII.GetBytes('RUNE'))
         $hdr.Add(2)
         $hdr.Add([byte]($epk.Length -band 0xFF)); $hdr.Add([byte](($epk.Length -shr 8) -band 0xFF))
         $hdr.AddRange($epk)
@@ -1421,7 +1446,7 @@ else {
         $outside = Join-Path $root 'pwned.txt'
         if ([System.IO.File]::Exists($outside)) { [System.IO.File]::Delete($outside) }
 
-        $t = New-ForgedCtxt -ZipBytes (New-ZipWithEntry -EntryName '..\pwned.txt') `
+        $t = New-ForgedRune -ZipBytes (New-ZipWithEntry -EntryName '..\pwned.txt') `
             -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'zipslip_backslash.txt')
         $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
 
@@ -1492,7 +1517,7 @@ else {
             $w = [System.IO.StreamWriter]::new($e.Open()); $w.Write("payload-$n"); $w.Dispose()
         }
         $za.Dispose()
-        $t = New-ForgedCtxt -ZipBytes $ms.ToArray() -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'partial.txt')
+        $t = New-ForgedRune -ZipBytes $ms.ToArray() -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'partial.txt')
 
         $root = New-Dir (Join-Path $script:Work 'unpack\rollback')
         $dest = New-Dir (Join-Path $root 'dest')
@@ -1539,7 +1564,7 @@ else {
         $outside = Join-Path $root $LeakName
         if ([System.IO.Directory]::Exists($outside)) { [System.IO.Directory]::Delete($outside, $true) }
 
-        $t = New-ForgedCtxt -ZipBytes (New-ZipWithDirEntry -EntryName $EntryName) `
+        $t = New-ForgedRune -ZipBytes (New-ZipWithDirEntry -EntryName $EntryName) `
             -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) "dirslip_$Tag.txt")
         $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
 
@@ -1576,7 +1601,7 @@ else {
         Assert ([System.IO.File]::Exists((Join-Path $dest 'existingdir\note.txt'))) '既有的無關子目錄內容被刪除了'
         Assert ([System.IO.File]::ReadAllText((Join-Path $dest 'existingdir\note.txt')) -eq 'KEEP-ME-TOO') '既有子目錄內檔案被改動'
         # 暫存資料夾不得殘留
-        $tmp = @([System.IO.Directory]::EnumerateDirectories($dest, '.ctxt-tmp-*'))
+        $tmp = @([System.IO.Directory]::EnumerateDirectories($dest, '.rune-tmp-*'))
         Assert ($tmp.Count -eq 0) ('殘留暫存資料夾：' + (($tmp | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
         # 同名檔案的處置（規格未定義，僅記錄實際語意）
         $alpha = [System.IO.File]::ReadAllText((Join-Path $dest 'alpha.txt'))
@@ -1596,9 +1621,9 @@ else {
         $r = Invoke-Roundtrip -Name 'deeppath' -Source $srcRoot
         $c = Compare-Tree -Expected (Get-TreeMap $srcRoot) -Actual (Get-TreeMap $r.Dest) -AllowRootPrefix 'deeppath'
         Assert ($null -eq $c.Diff) $c.Diff
-        $tmp = @([System.IO.Directory]::EnumerateDirectories($r.Dest, '.ctxt-tmp-*'))
+        $tmp = @([System.IO.Directory]::EnumerateDirectories($r.Dest, '.rune-tmp-*'))
         Assert ($tmp.Count -eq 0) '殘留暫存資料夾'
-        return ('相對路徑 {0} 字元、來源全長 {1} 字元，含 .ctxt-tmp 前綴仍完整還原' -f $rel.Length, $srcFile.Length)
+        return ('相對路徑 {0} 字元、來源全長 {1} 字元，含 .rune-tmp 前綴仍完整還原' -f $rel.Length, $srcFile.Length)
     }
 
     Invoke-Case 'C40' '原始受測腳本自始至終未被修改' {

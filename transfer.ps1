@@ -9,7 +9,7 @@
 
 .EXAMPLE
     .\transfer.ps1 -GenerateKeys
-    產生 ECDH P-256 金鑰對，私鑰以 DPAPI 保護後存到 ~\.ctxt\private.key，並在畫面印出公鑰 PEM。
+    產生 ECDH P-256 金鑰對，私鑰以 DPAPI 保護後存到 ~\.rune\private.key，並在畫面印出公鑰 PEM。
 
 .EXAMPLE
     .\transfer.ps1 -Pack C:\data\report.docx
@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Stop'
 # 使用方式：
 #   1. 先在「解密端」（保管私鑰的那台機器）執行：
 #        pwsh .\transfer.ps1 -GenerateKeys
-#      私鑰（ECDH P-256）會以 DPAPI（CurrentUser）保護後寫到 ~\.ctxt\private.key，
+#      私鑰（ECDH P-256）會以 DPAPI（CurrentUser）保護後寫到 ~\.rune\private.key，
 #      畫面會印出對應的公鑰 PEM。私鑰檔只有「同一台機器、同一個 Windows 帳號」
 #      能用 DPAPI 解回來，換機器或換帳號一律讀不開，因此不再需要另外設密碼。
 #   2. 把印出的 "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----"
@@ -67,7 +67,7 @@ $PublicKeyPem = ''
 
 # ==========================================================================
 # 容器二進位格式（加密前於記憶體組好，再整體 Base64）：
-#   magic "CTXT"(4B ASCII) | version 0x02(1B) | ephPubKeyLen(uint16 LE)
+#   magic "RUNE"(4B ASCII) | version 0x02(1B) | ephPubKeyLen(uint16 LE)
 #   | ephemeral ECDH P-256 公鑰（SubjectPublicKeyInfo DER）| nonce(12B) | tag(16B) | ciphertext
 #   明文側被加密的內容 = Brotli( Zip( 輸入 ) )
 #
@@ -78,12 +78,17 @@ $PublicKeyPem = ''
 #     派生 32 bytes 的 AES-256-GCM 金鑰。salt 選用 nonce（而非空）是為了讓每次
 #     Pack 產生的金鑰額外與該次的 nonce 綁定；info 內含 magic/version/ephemeral
 #     公鑰，確保派生結果與容器內容一一對應、不可跨欄位替換。
+#
+#   【新舊互斥】RUNE v2 與舊工具的 CTXT v2 無血緣關係，version 編號重用純屬巧合，
+#   兩者靠 magic 互斥：magic 檢查排在 version 檢查之前（見 ConvertFrom-RuneContainer），
+#   舊 CTXT 密文餵進來一定先被 magic 擋掉，永遠到不了 version 比對；反向亦然。
+#   縱深防禦：magic 亦在 HKDF info 內，即使強行跳過檢查，派生金鑰也不同 → tag 不符。
 # ==========================================================================
-$Script:CtxtMagic = 'CTXT'
-$Script:CtxtVersion = [byte] 2
+$Script:RuneMagic = 'RUNE'
+$Script:RuneVersion = [byte] 2
 $Script:NonceLength = 12
 $Script:TagLength = 16
-$Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.ctxt'
+$Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.rune'
 $Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.key'
 $Script:P256CurveOid = '1.2.840.10045.3.1.7'
 
@@ -109,7 +114,7 @@ function Get-ByteRange {
 # 區塊：打包（ZIP / store，UTF-8 檔名）
 # ==========================================================================
 
-function Get-CtxtPackPlan {
+function Get-RunePackPlan {
     <#
         依 -Pack 參數判斷輸入型態（單檔 / wildcard / 資料夾），
         回傳要打包的項目清單，以及推導輸出檔名用的基底名稱。
@@ -203,7 +208,7 @@ function Get-CtxtPackPlan {
     }
 }
 
-function New-CtxtZipBytes {
+function New-RuneZipBytes {
     <# 依項目清單建立 ZIP（store，UTF-8 檔名），回傳位元組陣列。含資料夾模式列舉的空目錄 entry。 #>
     param([object[]] $Entries)
 
@@ -243,7 +248,7 @@ function New-CtxtZipBytes {
 # 區塊：壓縮（Brotli）— 壓縮方向
 # ==========================================================================
 
-function Compress-CtxtBrotli {
+function Compress-RuneBrotli {
     param([byte[]] $InputBytes)
     $outMs = [System.IO.MemoryStream]::new()
     $brotli = [System.IO.Compression.BrotliStream]::new(
@@ -261,13 +266,13 @@ function Compress-CtxtBrotli {
 # 區塊：金鑰交換與派生（ECDH P-256 + HKDF-SHA256，加解密共用）
 # ==========================================================================
 
-function New-CtxtEcdhKeyPair {
+function New-RuneEcdhKeyPair {
     <# 產生一個新的 ECDH P-256 金鑰對（同時持有公私鑰） #>
     return [System.Security.Cryptography.ECDiffieHellman]::Create(
         [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
 }
 
-function Get-CtxtStaticPublicKey {
+function Get-RuneStaticPublicKey {
     <# 從腳本內嵌的 $PublicKeyPem 載入靜態 ECDH 公鑰（只含公鑰），並驗證曲線為 P-256 #>
     param([string] $PublicKeyPemText)
     $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
@@ -288,18 +293,18 @@ function Get-CtxtStaticPublicKey {
     return $ecdh
 }
 
-function Get-CtxtHkdfInfo {
+function Get-RuneHkdfInfo {
     <# HKDF 的 info：magic + version + ephemeral 公鑰 DER 位元組 #>
     param([byte[]] $EphPubKeyDer)
-    $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:CtxtMagic)
+    $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:RuneMagic)
     $info = [byte[]]::new($magicBytes.Length + 1 + $EphPubKeyDer.Length)
     [System.Buffer]::BlockCopy($magicBytes, 0, $info, 0, $magicBytes.Length)
-    $info[$magicBytes.Length] = $Script:CtxtVersion
+    $info[$magicBytes.Length] = $Script:RuneVersion
     [System.Buffer]::BlockCopy($EphPubKeyDer, 0, $info, $magicBytes.Length + 1, $EphPubKeyDer.Length)
     return , $info
 }
 
-function Get-CtxtDerivedAesKey {
+function Get-RuneDerivedAesKey {
     <# HKDF-SHA256(ikm=共享祕密, salt=nonce, info=magic+version+ephemeral公鑰) -> 32B AES 金鑰 #>
     param(
         [byte[]] $SharedSecret,
@@ -310,7 +315,7 @@ function Get-CtxtDerivedAesKey {
         [System.Security.Cryptography.HashAlgorithmName]::SHA256, $SharedSecret, 32, $Nonce, $InfoBytes)
 }
 
-function Protect-CtxtAesGcm {
+function Protect-RuneAesGcm {
     <# 用外部提供的 AES 金鑰／nonce 做 GCM 加密，回傳 Tag/Ciphertext #>
     param(
         [byte[]] $PlainBytes,
@@ -339,14 +344,14 @@ function Protect-CtxtAesGcm {
 # 區塊：容器二進位格式組裝
 # ==========================================================================
 
-function New-CtxtContainer {
+function New-RuneContainer {
     param(
         [byte[]] $EphPubKey,
         [byte[]] $Nonce,
         [byte[]] $Tag,
         [byte[]] $Ciphertext
     )
-    $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:CtxtMagic)
+    $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:RuneMagic)
     # 明確指定小端序寫入，不依賴 BitConverter 隨執行平台而定的位元組順序
     # （Windows 上兩者結果相同，但明確指定較不易出錯，也符合容器格式的
     # 「uint16 LE」宣告）。
@@ -355,7 +360,7 @@ function New-CtxtContainer {
 
     $ms = [System.IO.MemoryStream]::new()
     $ms.Write($magicBytes, 0, $magicBytes.Length)
-    $ms.WriteByte($Script:CtxtVersion)
+    $ms.WriteByte($Script:RuneVersion)
     $ms.Write($lenBytes, 0, 2)
     $ms.Write($EphPubKey, 0, $EphPubKey.Length)
     $ms.Write($Nonce, 0, $Nonce.Length)
@@ -368,7 +373,7 @@ function New-CtxtContainer {
 # 區塊：-Pack 主流程
 # ==========================================================================
 
-function Invoke-CtxtPack {
+function Invoke-RuneSeal {
     param(
         [string] $PackPath,
         [string] $OutFilePath,
@@ -379,7 +384,7 @@ function Invoke-CtxtPack {
         throw '尚未設定公鑰：請先在解密端執行 -GenerateKeys 產生金鑰對，並將印出的公鑰 PEM 貼入本腳本頂部的 $PublicKeyPem 變數後再重新執行 -Pack。'
     }
 
-    $plan = Get-CtxtPackPlan -PackPath $PackPath
+    $plan = Get-RunePackPlan -PackPath $PackPath
     if (-not $plan.Entries -or $plan.Entries.Count -eq 0) {
         throw "沒有可打包的項目（路徑或萬用字元未匹配到任何檔案）：$PackPath"
     }
@@ -396,16 +401,16 @@ function Invoke-CtxtPack {
     }
 
     Write-Host "打包中：共 $($plan.Entries.Count) 個項目..."
-    $zipBytes = New-CtxtZipBytes -Entries $plan.Entries
+    $zipBytes = New-RuneZipBytes -Entries $plan.Entries
     $originalSize = $zipBytes.Length
 
     Write-Host '壓縮中（Brotli, SmallestSize）...'
-    $compressed = Compress-CtxtBrotli -InputBytes $zipBytes
+    $compressed = Compress-RuneBrotli -InputBytes $zipBytes
     $compressedSize = $compressed.Length
 
     Write-Host '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
-    $ephemeral = New-CtxtEcdhKeyPair
-    $staticPub = Get-CtxtStaticPublicKey -PublicKeyPemText $PublicKeyPem
+    $ephemeral = New-RuneEcdhKeyPair
+    $staticPub = Get-RuneStaticPublicKey -PublicKeyPemText $PublicKeyPem
     $aesKey = $null
     try {
         $sharedSecret = $ephemeral.DeriveRawSecretAgreement($staticPub.PublicKey)
@@ -414,15 +419,15 @@ function Invoke-CtxtPack {
         $nonce = [byte[]]::new($Script:NonceLength)
         [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
 
-        $infoBytes = Get-CtxtHkdfInfo -EphPubKeyDer $ephPubKeyDer
-        $aesKey = Get-CtxtDerivedAesKey -SharedSecret $sharedSecret -Nonce $nonce -InfoBytes $infoBytes
+        $infoBytes = Get-RuneHkdfInfo -EphPubKeyDer $ephPubKeyDer
+        $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $nonce -InfoBytes $infoBytes
         [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
-        $aes = Protect-CtxtAesGcm -PlainBytes $compressed -AesKey $aesKey -Nonce $nonce
+        $aes = Protect-RuneAesGcm -PlainBytes $compressed -AesKey $aesKey -Nonce $nonce
     }
     finally {
         # 與解密端一致：無論成功或中途拋錯，aesKey 一律在 finally 清零，
-        # 不因 Protect-CtxtAesGcm 拋例外而讓金鑰殘留在記憶體中未被清除。
+        # 不因 Protect-RuneAesGcm 拋例外而讓金鑰殘留在記憶體中未被清除。
         if ($aesKey) {
             [Array]::Clear($aesKey, 0, $aesKey.Length)
         }
@@ -430,7 +435,7 @@ function Invoke-CtxtPack {
         $staticPub.Dispose()
     }
 
-    $container = New-CtxtContainer -EphPubKey $ephPubKeyDer -Nonce $nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
+    $container = New-RuneContainer -EphPubKey $ephPubKeyDer -Nonce $nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
 
     $b64Text = [Convert]::ToBase64String($container, [System.Base64FormattingOptions]::InsertLineBreaks)
     [System.IO.File]::WriteAllText($OutFilePath, $b64Text, [System.Text.Encoding]::ASCII)
@@ -447,7 +452,7 @@ function Invoke-CtxtPack {
 # 區塊：解壓（Brotli）— 解壓方向
 # ==========================================================================
 
-function Expand-CtxtBrotli {
+function Expand-RuneBrotli {
     param([byte[]] $InputBytes)
     $inMs = [System.IO.MemoryStream]::new($InputBytes)
     $outMs = [System.IO.MemoryStream]::new()
@@ -466,7 +471,7 @@ function Expand-CtxtBrotli {
 # 區塊：解密 — 解密方向
 # ==========================================================================
 
-function Get-CtxtSharedSecretForDecrypt {
+function Get-RuneSharedSecretForDecrypt {
     <# 用自己的 ECDH 私鑰與容器內的 ephemeral 公鑰做 ECDH，得共享祕密 #>
     param(
         [byte[]] $EphPubKeyDer,
@@ -497,7 +502,7 @@ function Get-CtxtSharedSecretForDecrypt {
 # 區塊：容器二進位格式解析
 # ==========================================================================
 
-function ConvertFrom-CtxtContainer {
+function ConvertFrom-RuneContainer {
     param([byte[]] $Bytes)
 
     $headerMin = 4 + 1 + 2
@@ -506,16 +511,16 @@ function ConvertFrom-CtxtContainer {
     }
 
     $magic = [System.Text.Encoding]::ASCII.GetString($Bytes, 0, 4)
-    if ($magic -ne $Script:CtxtMagic) {
+    if ($magic -ne $Script:RuneMagic) {
         throw "容器格式錯誤：檔頭 magic 不符（讀到 '$magic'），此檔案可能不是本工具產生的密文"
     }
 
     $version = $Bytes[4]
-    if ($version -ne $Script:CtxtVersion) {
-        throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:CtxtVersion)"
+    if ($version -ne $Script:RuneVersion) {
+        throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:RuneVersion)"
     }
 
-    # 明確指定小端序讀取，對應寫入端 New-CtxtContainer 的 WriteUInt16LittleEndian
+    # 明確指定小端序讀取，對應寫入端 New-RuneContainer 的 WriteUInt16LittleEndian
     $ephPubKeyLenBytes = Get-ByteRange -Source $Bytes -Offset 5 -Length 2
     $ephPubKeyLen = [System.Buffers.Binary.BinaryPrimitives]::ReadUInt16LittleEndian($ephPubKeyLenBytes)
     $offset = 7
@@ -545,7 +550,7 @@ function ConvertFrom-CtxtContainer {
 # 區塊：ZIP 解包
 # ==========================================================================
 
-function Expand-CtxtZip {
+function Expand-RuneZip {
     <# 將 ZIP 位元組解開到目的資料夾（手動走 stream，防 zip-slip） #>
     param(
         [byte[]] $ZipBytes,
@@ -561,7 +566,7 @@ function Expand-CtxtZip {
             $destRootWithSep = $destRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 
             foreach ($entry in $zip.Entries) {
-                # (a) 本工具自家產物一律用 '/' 當目錄分隔符（打包端 Get-CtxtPackPlan 已把
+                # (a) 本工具自家產物一律用 '/' 當目錄分隔符（打包端 Get-RunePackPlan 已把
                 #     '\' 轉成 '/'，見該函式內的 -replace '\\', '/'）。因此 entry 名稱只要
                 #     含反斜線，就一定不是自家封裝，直接拒絕，不嘗試解讀成相對路徑。
                 if ($entry.FullName -match '\\') {
@@ -615,7 +620,7 @@ function Expand-CtxtZip {
     }
 }
 
-function Move-CtxtExtractedTree {
+function Move-RuneExtractedTree {
     <#
         把 $SourceDir 底下的內容遞迴搬到 $DestDir（同名目錄就合併、同名檔案就覆蓋），
         用於 -Unpack 的「先解到暫存資料夾，全部成功後才搬到正式 Destination」流程。
@@ -633,7 +638,7 @@ function Move-CtxtExtractedTree {
         $targetPath = Join-Path -Path $DestDir -ChildPath $child.Name
         if ($child.PSIsContainer) {
             if (Test-Path -LiteralPath $targetPath -PathType Container) {
-                Move-CtxtExtractedTree -SourceDir $child.FullName -DestDir $targetPath
+                Move-RuneExtractedTree -SourceDir $child.FullName -DestDir $targetPath
             }
             else {
                 Move-Item -LiteralPath $child.FullName -Destination $targetPath -Force
@@ -649,9 +654,9 @@ function Move-CtxtExtractedTree {
 # 區塊：私鑰載入（-Unpack 用；DPAPI CurrentUser 保護的 Pkcs8 私鑰 blob）
 # ==========================================================================
 
-function Get-CtxtPrivateKey {
+function Get-RunePrivateKey {
     <#
-        讀取 ~\.ctxt\private.key（或 -KeyFile 指定路徑），該檔內容是用
+        讀取 ~\.rune\private.key（或 -KeyFile 指定路徑），該檔內容是用
         DPAPI（CurrentUser scope）保護過的 ECDH P-256 Pkcs8 私鑰位元組。
         只有「同一台機器、同一個 Windows 帳號」才解得開；否則視為
         「私鑰讀不到／DPAPI 解保護失敗」。
@@ -709,7 +714,7 @@ function Get-CtxtPrivateKey {
 # 區塊：-Unpack 主流程
 # ==========================================================================
 
-function Invoke-CtxtUnpack {
+function Invoke-RuneOpen {
     param(
         [string] $InFilePath,
         [string] $DestinationPath,
@@ -733,17 +738,17 @@ function Invoke-CtxtUnpack {
         throw "Base64 解碼失敗：檔案內容可能已損壞或被截斷（$($_.Exception.Message)）"
     }
 
-    $parsed = ConvertFrom-CtxtContainer -Bytes $containerBytes
+    $parsed = ConvertFrom-RuneContainer -Bytes $containerBytes
 
-    $ecdh = Get-CtxtPrivateKey -KeyFilePath $KeyFilePath
+    $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath
     try {
-        $sharedSecret = Get-CtxtSharedSecretForDecrypt -EphPubKeyDer $parsed.EphPubKey -OwnPrivateKey $ecdh
+        $sharedSecret = Get-RuneSharedSecretForDecrypt -EphPubKeyDer $parsed.EphPubKey -OwnPrivateKey $ecdh
     }
     finally {
         $ecdh.Dispose()
     }
-    $infoBytes = Get-CtxtHkdfInfo -EphPubKeyDer $parsed.EphPubKey
-    $aesKey = Get-CtxtDerivedAesKey -SharedSecret $sharedSecret -Nonce $parsed.Nonce -InfoBytes $infoBytes
+    $infoBytes = Get-RuneHkdfInfo -EphPubKeyDer $parsed.EphPubKey
+    $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $parsed.Nonce -InfoBytes $infoBytes
     [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
     try {
@@ -765,7 +770,7 @@ function Invoke-CtxtUnpack {
     }
 
     try {
-        $zipBytes = Expand-CtxtBrotli -InputBytes $plain
+        $zipBytes = Expand-RuneBrotli -InputBytes $plain
     }
     catch {
         throw "Brotli 解壓縮失敗：資料可能已損壞（$($_.Exception.Message)）"
@@ -773,10 +778,10 @@ function Invoke-CtxtUnpack {
 
     # 先解到 Destination 底下的暫存資料夾，全部成功後才搬到正式位置；
     # 任何一步失敗都清掉暫存資料夾並報錯，Destination 不留半成品。
-    $tmpDir = Join-Path -Path $DestinationPath -ChildPath (".ctxt-tmp-" + [Guid]::NewGuid().ToString('N'))
+    $tmpDir = Join-Path -Path $DestinationPath -ChildPath (".rune-tmp-" + [Guid]::NewGuid().ToString('N'))
     try {
         try {
-            Expand-CtxtZip -ZipBytes $zipBytes -Destination $tmpDir
+            Expand-RuneZip -ZipBytes $zipBytes -Destination $tmpDir
         }
         catch [System.Security.SecurityException] {
             # 路徑安全例外（zip-slip 等）要原樣往上拋，不可被包成「封裝格式錯誤或已損壞」，
@@ -788,7 +793,7 @@ function Invoke-CtxtUnpack {
         }
 
         try {
-            Move-CtxtExtractedTree -SourceDir $tmpDir -DestDir $DestinationPath
+            Move-RuneExtractedTree -SourceDir $tmpDir -DestDir $DestinationPath
         }
         catch {
             throw "解包結果搬移失敗：無法將暫存資料夾內容搬到 $DestinationPath（$($_.Exception.Message)）"
@@ -807,7 +812,7 @@ function Invoke-CtxtUnpack {
 # 區塊：-GenerateKeys 主流程
 # ==========================================================================
 
-function Invoke-CtxtGenerateKeys {
+function Invoke-RuneGenerateKeys {
     if (Test-Path -LiteralPath $Script:DefaultKeyFile) {
         throw "私鑰檔案已存在，為避免覆蓋既有金鑰（可能導致已加密的舊檔案永久無法解密），已拒絕操作：$($Script:DefaultKeyFile)`n如確定要產生新金鑰，請先手動備份／移除該檔案後再重新執行。"
     }
@@ -817,7 +822,7 @@ function Invoke-CtxtGenerateKeys {
     }
 
     Write-Host '產生 ECDH P-256 金鑰對中，請稍候...'
-    $ecdh = New-CtxtEcdhKeyPair
+    $ecdh = New-RuneEcdhKeyPair
     $pkcs8Bytes = $null
     try {
         $pkcs8Bytes = $ecdh.ExportPkcs8PrivateKey()
@@ -852,13 +857,13 @@ function Invoke-CtxtGenerateKeys {
 try {
     switch ($PSCmdlet.ParameterSetName) {
         'GenerateKeys' {
-            Invoke-CtxtGenerateKeys
+            Invoke-RuneGenerateKeys
         }
         'Pack' {
-            Invoke-CtxtPack -PackPath $Pack -OutFilePath $OutFile -ForceOverwrite:$Force
+            Invoke-RuneSeal -PackPath $Pack -OutFilePath $OutFile -ForceOverwrite:$Force
         }
         'Unpack' {
-            Invoke-CtxtUnpack -InFilePath $Unpack -DestinationPath $Destination -KeyFilePath $KeyFile
+            Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination -KeyFilePath $KeyFile
         }
     }
 }
