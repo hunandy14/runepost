@@ -1,0 +1,2 @@
+*.ps1 text eol=lf
+dist/*.ps1 linguist-generated=true
