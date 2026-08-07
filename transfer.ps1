@@ -85,6 +85,7 @@ $Script:NonceLength = 12
 $Script:TagLength = 16
 $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.ctxt'
 $Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.key'
+$Script:P256CurveOid = '1.2.840.10045.3.1.7'
 
 # ==========================================================================
 # 區塊：位元組工具
@@ -267,15 +268,23 @@ function New-CtxtEcdhKeyPair {
 }
 
 function Get-CtxtStaticPublicKey {
-    <# 從腳本內嵌的 $PublicKeyPem 載入靜態 ECDH 公鑰（只含公鑰） #>
+    <# 從腳本內嵌的 $PublicKeyPem 載入靜態 ECDH 公鑰（只含公鑰），並驗證曲線為 P-256 #>
     param([string] $PublicKeyPemText)
     $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
     try {
         $ecdh.ImportFromPem($PublicKeyPemText)
     }
     catch {
+        $ecdh.Dispose()
         throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"
     }
+
+    $curveOid = $ecdh.ExportParameters($false).Curve.Oid.Value
+    if ($curveOid -ne $Script:P256CurveOid) {
+        $ecdh.Dispose()
+        throw "公鑰不是 P-256：曲線 OID 為 $curveOid，本工具僅支援 P-256（$($Script:P256CurveOid)）"
+    }
+
     return $ecdh
 }
 
@@ -676,6 +685,11 @@ function Get-CtxtPrivateKey {
         }
         catch {
             throw "私鑰讀不到／DPAPI 解保護失敗：DPAPI 解密後的私鑰內容格式無效（$($_.Exception.Message)）"
+        }
+
+        $curveOid = $ecdh.ExportParameters($false).Curve.Oid.Value
+        if ($curveOid -ne $Script:P256CurveOid) {
+            throw "私鑰不是 P-256：曲線 OID 為 $curveOid，本工具僅支援 P-256（$($Script:P256CurveOid)）"
         }
     }
     catch {
