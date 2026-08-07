@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     流程：打包（ZIP/store）→ 壓縮（Brotli）→ 加密（ECDH P-256 + HKDF-SHA256 派生 AES-256-GCM 金鑰）→ 文字編碼（Base64）。
-    純 .NET 內建類別實作，零外部依賴，全程 .NET stream / 記憶體操作，不讓二進位資料經過 PowerShell 管道。
+    純 .NET 內建類別實作，零外部依賴，全程記憶體操作，不經 PowerShell 管道。
 
 .EXAMPLE
     .\transfer.ps1 -GenerateKeys
@@ -374,6 +374,7 @@ function Invoke-CtxtPack {
     Write-Host '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
     $ephemeral = New-CtxtEcdhKeyPair
     $staticPub = Get-CtxtStaticPublicKey -PublicKeyPemText $PublicKeyPem
+    $aesKey = $null
     try {
         $sharedSecret = $ephemeral.DeriveRawSecretAgreement($staticPub.PublicKey)
         $ephPubKeyDer = $ephemeral.ExportSubjectPublicKeyInfo()
@@ -386,9 +387,13 @@ function Invoke-CtxtPack {
         [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
         $aes = Protect-CtxtAesGcm -PlainBytes $compressed -AesKey $aesKey -Nonce $nonce
-        [Array]::Clear($aesKey, 0, $aesKey.Length)
     }
     finally {
+        # 與解密端一致：無論成功或中途拋錯，aesKey 一律在 finally 清零，
+        # 不因 Protect-CtxtAesGcm 拋例外而讓金鑰殘留在記憶體中未被清除。
+        if ($aesKey) {
+            [Array]::Clear($aesKey, 0, $aesKey.Length)
+        }
         $ephemeral.Dispose()
         $staticPub.Dispose()
     }
