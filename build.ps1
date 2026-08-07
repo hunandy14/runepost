@@ -92,6 +92,9 @@ $Script:Manifest = [ordered]@{
         # --- container：容器格式常數 ---
         'container/format-spec.ps1'
         'keystore/paths.ps1'
+        # --- keystore：私鑰路徑常數（open 專用，見該檔註解：不與 seal 共用是為了
+        #     負面符號掃描——DefaultKeyFile 不該出現在 dist/rune-seal.ps1 裡）---
+        'keystore/private-paths.ps1'
         # --- container：位元組工具 ---
         'container/byte-range.ps1'
         # --- crypto / keystore：金鑰交換與派生（-GenerateKeys 用得到 ecdh-keygen）---

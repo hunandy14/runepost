@@ -581,6 +581,30 @@ function Find-PublicKeyAssignment {
     return @{ Ast = $ast; Errors = $e; Hit = ($hits | Select-Object -First 1) }
 }
 
+function Get-RuneCodeTokenTexts {
+    <#
+        回傳檔案內所有「非註解」token 的原始文字——用來做負面符號掃描。
+        只看 token 不看純文字比對（Select-String）的原因：src/ 的 fragment 之間
+        常常在註解裡互相提及對方的符號名稱（例如「見 Invoke-RuneOpen」這種交叉
+        參照說明），若直接對整份檔案文字做字串搜尋，這些註解會造成偽陽性，讓斷言
+        失去意義。排掉 Comment 這個 token kind 後，剩下的就是「真正的程式碼」。
+    #>
+    param([string] $Path)
+    $tokens = $null
+    $errs = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errs)
+    return @($tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text })
+}
+
+function Test-NoForbiddenSymbols {
+    <# 斷言 $Path 的程式碼（不含註解）不含 $Forbidden 內任何一個符號的子字串。 #>
+    param([string] $Path, [string[]] $Forbidden)
+    $codeTokens = Get-RuneCodeTokenTexts -Path $Path
+    $hits = @($Forbidden | Where-Object { $sym = $_; $codeTokens | Where-Object { $_ -like "*$sym*" } | Select-Object -First 1 })
+    Assert ($hits.Count -eq 0) ("$(Split-Path -Leaf $Path) 的程式碼含有不該出現的符號：" + ($hits -join ', '))
+    return ('已確認不含：' + ($Forbidden -join ', '))
+}
+
 # ==============================================================================
 # 7. 沙箱家目錄 + 受測物 -GenerateKeys 取得測試金鑰
 # ==============================================================================
@@ -1654,6 +1678,29 @@ function Invoke-VerifyTrack {
         Assert ($r.StdErr -match '公鑰 PEM 格式無效，無法載入') `
         ('訊息未明講「公鑰 PEM 格式無效，無法載入」：' + (Squash $r.StdErr 200))
         return (Squash $r.StdErr 130)
+    }
+
+    # 負面符號掃描守的是「最小部署」這個屬性本身：加密端不該帶著任何解密相關的
+    # 程式碼（DPAPI／私鑰匯入／ZIP 解包），反之亦然。沒有這道檢查，幾次「順手」
+    # 的改動之後解密邏輯會慢慢滲回加密端，切檔就白做了。只掃「非註解」token
+    # （見 Test-NoForbiddenSymbols），註解裡的交叉參照說明不算違規。
+
+    Invoke-TCase 'C63' '負面符號掃描：rune-seal.ps1 的程式碼不含任何解密端專屬符號' {
+        Test-NoForbiddenSymbols -Path $script:SutSeal -Forbidden @(
+            'ImportPkcs8PrivateKey', 'ProtectedData',
+            'Expand-RuneZip', 'Move-RuneExtractedTree',
+            'Get-RunePrivateKey', 'Invoke-RuneOpen',
+            'Invoke-RuneGenerateKeys', 'Invoke-RuneExportPublicKey',
+            'DefaultKeyFile', 'DefaultKeyDir'
+        )
+    }
+
+    Invoke-TCase 'C64' '負面符號掃描：rune-open.ps1 的程式碼不含任何加密端專屬符號' {
+        Test-NoForbiddenSymbols -Path $script:SutOpen -Forbidden @(
+            'Get-RunePackPlan', 'New-RuneZipBytes', 'Compress-RuneBrotli',
+            'Get-RunePublicKey', 'Get-RuneMissingPublicKeyMessage',
+            'Protect-RuneAesGcm', 'New-RuneContainer', 'Invoke-RuneSeal'
+        )
     }
 
     Write-Host ''

@@ -1,8 +1,8 @@
 ﻿# 本檔由 build.ps1 自 src/ 組裝產生，請勿直接編輯 —— 請改 src/ 後重跑 build.ps1
-# source-digest: bafc35e072bb
+# source-digest: bbc9c01226b9
 # format: RUNE v2
 # product: rune-open
-# fragments: 19
+# fragments: 20
 #Requires -Version 7.4
 <#
 .SYNOPSIS
@@ -117,10 +117,20 @@ $Script:ContentTypeFileTree = [byte] 1
 $Script:ContentTypeText = [byte] 2
 $Script:NonceLength = 12
 $Script:TagLength = 16
+# seal + open 共用：只放兩邊都要用到的常數。私鑰相關的路徑常數
+# （$Script:DefaultKeyDir / $Script:DefaultKeyFile）刻意不放這裡，改放
+# keystore/private-paths.ps1（只給 open 用）——否則只要 seal 端載入了這個
+# 共用 fragment，dist/rune-seal.ps1 的原始碼文字裡就會出現 "DefaultKeyFile"
+# 這個符號（即使從未被引用），讓「加密端不含任何解密相關符號」這個負面掃描
+# 斷言失去意義。兩檔各自獨立算出 $HOME\.rune，屬性上有一行的重複，換來的是
+# 這個純文字層級的隔離可被靜態掃描驗證。
+$Script:DefaultPublicKeyFile = Join-Path -Path (Join-Path -Path $HOME -ChildPath '.rune') -ChildPath 'public.pem'
+$Script:P256CurveOid = '1.2.840.10045.3.1.7'
+# open 專用：私鑰檔的路徑常數。刻意與 keystore/paths.ps1（seal + open 共用）
+# 分開成獨立 fragment，只給 rune-open.ps1 的 manifest 收錄——確保
+# "DefaultKeyFile" 這個符號不會出現在 dist/rune-seal.ps1 的原始碼文字裡。
 $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.rune'
 $Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.key'
-$Script:DefaultPublicKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'public.pem'
-$Script:P256CurveOid = '1.2.840.10045.3.1.7'
 
 # ==========================================================================
 # 區塊：位元組工具
