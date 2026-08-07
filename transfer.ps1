@@ -9,7 +9,7 @@
 
 .EXAMPLE
     .\transfer.ps1 -GenerateKeys
-    產生 ECDH P-256 金鑰對，私鑰存到 ~\.ctxt\private.pem，並在畫面印出公鑰 PEM。
+    產生 ECDH P-256 金鑰對，私鑰以 DPAPI 保護後存到 ~\.ctxt\private.key，並在畫面印出公鑰 PEM。
 
 .EXAMPLE
     .\transfer.ps1 -Pack C:\data\report.docx
@@ -53,7 +53,9 @@ $ErrorActionPreference = 'Stop'
 # 使用方式：
 #   1. 先在「解密端」（保管私鑰的那台機器）執行：
 #        pwsh .\transfer.ps1 -GenerateKeys
-#      私鑰（ECDH P-256）會寫到 ~\.ctxt\private.pem，畫面會印出對應的公鑰 PEM。
+#      私鑰（ECDH P-256）會以 DPAPI（CurrentUser）保護後寫到 ~\.ctxt\private.key，
+#      畫面會印出對應的公鑰 PEM。私鑰檔只有「同一台機器、同一個 Windows 帳號」
+#      能用 DPAPI 解回來，換機器或換帳號一律讀不開，因此不再需要另外設密碼。
 #   2. 把印出的 "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----"
 #      完整貼到下面 $PublicKeyPem 這個 here-string 裡（保留左右單引號 @' / '@）。
 #   3. 把貼好公鑰的這份腳本複製/分發到「加密端」機器即可執行 -Pack。
@@ -82,7 +84,7 @@ $Script:CtxtVersion = [byte] 2
 $Script:NonceLength = 12
 $Script:TagLength = 16
 $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.ctxt'
-$Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.pem'
+$Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.key'
 
 # ==========================================================================
 # 區塊：位元組工具
@@ -553,11 +555,16 @@ function Expand-CtxtZip {
 }
 
 # ==========================================================================
-# 區塊：私鑰載入（-Unpack 用；-GenerateKeys 的產生流程於下一個里程碑實作）
+# 區塊：私鑰載入（-Unpack 用；DPAPI CurrentUser 保護的 Pkcs8 私鑰 blob）
 # ==========================================================================
 
 function Get-CtxtPrivateKey {
-    <# 載入私鑰 PEM；若為加密 PEM 則互動詢問密碼（Read-Host -AsSecureString） #>
+    <#
+        讀取 ~\.ctxt\private.key（或 -KeyFile 指定路徑），該檔內容是用
+        DPAPI（CurrentUser scope）保護過的 ECDH P-256 Pkcs8 私鑰位元組。
+        只有「同一台機器、同一個 Windows 帳號」才解得開；否則視為
+        「私鑰讀不到／DPAPI 解保護失敗」。
+    #>
     param([string] $KeyFilePath)
 
     if ([string]::IsNullOrWhiteSpace($KeyFilePath)) {
@@ -568,35 +575,35 @@ function Get-CtxtPrivateKey {
         throw "私鑰檔案讀取失敗：找不到 $KeyFilePath（請確認路徑，或先以 -GenerateKeys 產生金鑰）"
     }
 
-    $pemText = [System.IO.File]::ReadAllText($KeyFilePath)
+    $protectedBytes = [System.IO.File]::ReadAllBytes($KeyFilePath)
+
+    $pkcs8Bytes = $null
+    try {
+        $pkcs8Bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $protectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    }
+    catch {
+        throw "私鑰讀不到／DPAPI 解保護失敗（是否為非本機、非本 Windows 帳號產生的私鑰檔，或檔案已損壞？）：$($_.Exception.Message)"
+    }
 
     $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
     try {
-        if ($pemText -match 'ENCRYPTED PRIVATE KEY') {
-            $securePwd = Read-Host -Prompt '私鑰已加密，請輸入密碼' -AsSecureString
-            $plainPwd = [System.Net.NetworkCredential]::new('', $securePwd).Password
-            try {
-                $ecdh.ImportFromEncryptedPem($pemText, $plainPwd)
-            }
-            catch {
-                throw "私鑰解密失敗：密碼錯誤，或私鑰檔案已損壞（$($_.Exception.Message)）"
-            }
-            finally {
-                $plainPwd = $null
-            }
+        $bytesRead = 0
+        try {
+            $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead)
         }
-        else {
-            try {
-                $ecdh.ImportFromPem($pemText)
-            }
-            catch {
-                throw "私鑰讀不到或解不開：PEM 格式無效或檔案已損壞（$($_.Exception.Message)）"
-            }
+        catch {
+            throw "私鑰讀不到／DPAPI 解保護失敗：DPAPI 解密後的私鑰內容格式無效（$($_.Exception.Message)）"
         }
     }
     catch {
         $ecdh.Dispose()
         throw
+    }
+    finally {
+        if ($pkcs8Bytes) {
+            [Array]::Clear($pkcs8Bytes, 0, $pkcs8Bytes.Length)
+        }
     }
 
     return $ecdh
@@ -693,33 +700,27 @@ function Invoke-CtxtGenerateKeys {
 
     Write-Host '產生 ECDH P-256 金鑰對中，請稍候...'
     $ecdh = New-CtxtEcdhKeyPair
+    $pkcs8Bytes = $null
     try {
-        $securePwd = Read-Host -Prompt '設定私鑰保護密碼（可留空，直接按 Enter 略過＝不加密私鑰）' -AsSecureString
-        $plainPwd = [System.Net.NetworkCredential]::new('', $securePwd).Password
+        $pkcs8Bytes = $ecdh.ExportPkcs8PrivateKey()
+        $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+            $pkcs8Bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
 
-        if ([string]::IsNullOrEmpty($plainPwd)) {
-            $privatePem = $ecdh.ExportPkcs8PrivateKeyPem()
-        }
-        else {
-            $pbeParams = [System.Security.Cryptography.PbeParameters]::new(
-                [System.Security.Cryptography.PbeEncryptionAlgorithm]::Aes256Cbc,
-                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-                600000)
-            $privatePem = $ecdh.ExportEncryptedPkcs8PrivateKeyPem($plainPwd, $pbeParams)
-        }
-        $plainPwd = $null
-
-        [System.IO.File]::WriteAllText($Script:DefaultKeyFile, $privatePem)
+        [System.IO.File]::WriteAllBytes($Script:DefaultKeyFile, $protectedBytes)
 
         $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
     }
     finally {
+        if ($pkcs8Bytes) {
+            [Array]::Clear($pkcs8Bytes, 0, $pkcs8Bytes.Length)
+        }
         $ecdh.Dispose()
     }
 
     Write-Host ''
-    Write-Host "私鑰已寫入：$($Script:DefaultKeyFile)"
-    Write-Host '請妥善保管此檔案並自行備份，遺失將無法解密任何已用對應公鑰加密的檔案。'
+    Write-Host "私鑰已寫入（DPAPI CurrentUser 保護）：$($Script:DefaultKeyFile)"
+    Write-Host '此檔案只有在這台機器、這個 Windows 帳號下才解得開；請自行備份，'
+    Write-Host '遺失或搬到別的機器／帳號，將無法解密任何已用對應公鑰加密的檔案。'
     Write-Host ''
     Write-Host '===== 請將以下公鑰 PEM 完整貼入 transfer.ps1 頂部的 $PublicKeyPem 變數（加密端使用）====='
     Write-Host $publicPem
