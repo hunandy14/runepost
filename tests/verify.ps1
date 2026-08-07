@@ -5,13 +5,12 @@
 
 .DESCRIPTION
     本腳本只依據凍結規格撰寫，未讀取任何受測實作原始碼。
-    雙軌驗證：ALL 軌對 dist\rune-all.ps1（合體版，暫留作對照組）跑一次全套案例，
-    SPLIT 軌對 dist\rune-seal.ps1 + dist\rune-open.ps1（真正的兩個產物）再跑一次。
-    兩軌案例編號以 ':ALL' / ':SPLIT' 區分，任一軌任一案例 FAIL 則整體視為失敗。
-    若 SPLIT 紅而 ALL 綠，問題必在 build.ps1 manifest 收錄，而非程式邏輯本身。
+    對 dist\rune-seal.ps1（加密端）與 dist\rune-open.ps1（解密端 + 金鑰管理）
+    兩個產物跑一套完整案例；-Pack 相關案例一律對 rune-seal.ps1 執行，
+    -Unpack / -GenerateKeys / -ExportPublicKey 相關案例一律對 rune-open.ps1 執行。
 
 .PARAMETER RepoRoot
-    repo 根目錄（內含 dist\rune-all.ps1 / dist\rune-seal.ps1 / dist\rune-open.ps1）。
+    repo 根目錄（內含 dist\rune-seal.ps1 / dist\rune-open.ps1）。
 
 .EXAMPLE
     pwsh -File .\verify.ps1 -RepoRoot Z:\path\to\repo
@@ -50,7 +49,6 @@ $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:Utf8Bom = [System.Text.UTF8Encoding]::new($true)
 
 $script:RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-$script:AllScript = Join-Path $script:RepoRoot 'dist\rune-all.ps1'
 $script:SealScript = Join-Path $script:RepoRoot 'dist\rune-seal.ps1'
 $script:OpenScript = Join-Path $script:RepoRoot 'dist\rune-open.ps1'
 
@@ -762,7 +760,7 @@ function New-ForgedRune {
 # ==============================================================================
 
 Write-Host ''
-Write-Host '========== runepost 獨立驗收（規格 v2 / container 0x02 / 雙軌：ALL + SPLIT）==========' -ForegroundColor Cyan
+Write-Host '========== runepost 獨立驗收（規格 v2 / container 0x02 / rune-seal + rune-open）==========' -ForegroundColor Cyan
 
 if ($Clean -and (Test-Path -LiteralPath $script:Work)) {
     Remove-Item -LiteralPath $script:Work -Recurse -Force -ErrorAction SilentlyContinue
@@ -772,25 +770,21 @@ $script:WrapperPath = Join-Path $script:Work 'wrapper.ps1'
 [System.IO.File]::WriteAllText($script:WrapperPath, $script:WrapperSource, $script:Utf8Bom)
 
 # ==============================================================================
-# 9. 單軌驗證：對一組 (SealScript, OpenScript) 跑完整套案例
-#    ALL 軌：SealScript = OpenScript = dist\rune-all.ps1（合體版，暫留作對照組）
-#    SPLIT 軌：SealScript = dist\rune-seal.ps1，OpenScript = dist\rune-open.ps1
-#    案例編號一律加上 ":<TrackLabel>" 後綴，兩軌互不干擾、互不覆蓋對方的報表列。
+# 9. 驗證主體：對 (SealScript, OpenScript) = (rune-seal.ps1, rune-open.ps1) 跑完整套案例
 # ==============================================================================
 
 function Invoke-VerifyTrack {
     param(
-        [string]$TrackLabel,
         [string]$SealScript,
         [string]$OpenScript
     )
 
-    $script:Work = Join-Path $WorkRoot $TrackLabel
+    $script:Work = $WorkRoot
     [void](New-Dir $script:Work)
 
     function Invoke-TCase {
         param([string]$Id, [string]$Name, [scriptblock]$Body)
-        Invoke-Case -Id "$Id`:$TrackLabel" -Name $Name -Body $Body
+        Invoke-Case -Id $Id -Name $Name -Body $Body
     }
 
     $script:SutSeal = $null
@@ -805,7 +799,7 @@ function Invoke-VerifyTrack {
     $script:KdfInfo = $null
 
     Write-Host ''
-    Write-Host "-- 前置（$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- 前置 --' -ForegroundColor Cyan
 
     Invoke-TCase 'P1a' '受測腳本存在且語法可解析（seal）' {
         Assert ([System.IO.File]::Exists($SealScript)) "找不到受測腳本（seal）：$SealScript"
@@ -889,7 +883,7 @@ function Invoke-VerifyTrack {
     }
 
     # 前置未過就沒有意義往下跑（只看本軌新增的 P 系列結果，不受另一軌影響）
-    $preFailCount = @($script:Results | Where-Object { $_.No -like "P*:$TrackLabel" -and $_.Result -eq 'FAIL' }).Count
+    $preFailCount = @($script:Results | Where-Object { $_.No -like 'P*' -and $_.Result -eq 'FAIL' }).Count
     $trackCanRun = ($preFailCount -eq 0)
 
     # ------- 共用測試素材 -------
@@ -934,12 +928,12 @@ function Invoke-VerifyTrack {
 
     if (-not $trackCanRun) {
         Write-Host ''
-        Write-Host "[$TrackLabel] 前置作業失敗，後續案例全部跳過。" -ForegroundColor Red
+        Write-Host '前置作業失敗，後續案例全部跳過。' -ForegroundColor Red
         return
     }
 
     Write-Host ''
-    Write-Host "-- Roundtrip（$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- Roundtrip --' -ForegroundColor Cyan
 
     Invoke-TCase 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）' {
         $src = Join-Path $script:Fx 'single\payload.bin'
@@ -978,7 +972,7 @@ function Invoke-VerifyTrack {
     }
 
     Write-Host ''
-    Write-Host "-- 格式白盒（$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- 格式白盒 --' -ForegroundColor Cyan
 
     Invoke-TCase 'C04' '容器結構：magic/version=0x02/ephPubKeyLen/各段偏移自洽' {
         Assert ($null -ne $script:CtTree) 'C03 未產生容器'
@@ -1109,7 +1103,7 @@ function Invoke-VerifyTrack {
     }
 
     Write-Host ''
-    Write-Host "-- 錯誤路徑（$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- 錯誤路徑 --' -ForegroundColor Cyan
 
     Invoke-TCase 'C12' '竄改 base64 一字元 → 報內容損壞（tag 驗證）' {
         $t = Copy-Container $script:CtTree 'tamper_b64.txt'
@@ -1332,7 +1326,7 @@ function Invoke-VerifyTrack {
     }
 
     Write-Host ''
-    Write-Host "-- CLI / 預設檔名（$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- CLI / 預設檔名 --' -ForegroundColor Cyan
 
     function Test-DefaultName {
         param([string]$InputPath, [string]$Expected, [string]$Tag)
@@ -1383,18 +1377,12 @@ function Invoke-VerifyTrack {
         return (Squash $o 110)
     }
 
-    Invoke-TCase 'C29' 'parameter set 互斥／各產物拒絕對方參數：-Pack 與 -Unpack 併用 → 報錯' {
-        if ($SealScript -eq $OpenScript) {
-            $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-Unpack', $script:CtTree, '-Destination', (New-Dir (Join-Path $script:Work 'unpack\mix'))) -EnvVars $script:KeyA.Sandbox.Env
-            return (Expect-Failure $r 'param' '-Pack 與 -Unpack 併用（合體版 ParameterSet 互斥）')
-        }
-        else {
-            $r1 = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Unpack', $script:CtTree, '-Destination', (New-Dir (Join-Path $script:Work 'unpack\mix1'))) -EnvVars $script:KeyA.Sandbox.Env
-            $ev1 = Expect-Failure $r1 'param' 'rune-seal.ps1 收到 -Unpack'
-            $r2 = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin')) -EnvVars $script:KeyA.Sandbox.Env
-            $ev2 = Expect-Failure $r2 'param' 'rune-open.ps1 收到 -Pack'
-            return ("seal 拒絕 -Unpack（$ev1）；open 拒絕 -Pack（$ev2）")
-        }
+    Invoke-TCase 'C29' '各產物拒絕對方參數：rune-seal 拒絕 -Unpack、rune-open 拒絕 -Pack' {
+        $r1 = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Unpack', $script:CtTree, '-Destination', (New-Dir (Join-Path $script:Work 'unpack\mix1'))) -EnvVars $script:KeyA.Sandbox.Env
+        $ev1 = Expect-Failure $r1 'param' 'rune-seal.ps1 收到 -Unpack'
+        $r2 = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin')) -EnvVars $script:KeyA.Sandbox.Env
+        $ev2 = Expect-Failure $r2 'param' 'rune-open.ps1 收到 -Pack'
+        return ("seal 拒絕 -Unpack（$ev1）；open 拒絕 -Pack（$ev2）")
     }
 
     Invoke-TCase 'C30' '-Unpack 缺 -Destination → 報錯（不得卡在互動）' {
@@ -1404,7 +1392,7 @@ function Invoke-VerifyTrack {
     }
 
     Write-Host ''
-    Write-Host "-- 金鑰儲存 / GenerateKeys（$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- 金鑰儲存 / GenerateKeys --' -ForegroundColor Cyan
 
     Invoke-TCase 'C31' '私鑰檔為 DPAPI blob（非明文 PEM）' {
         $b = [System.IO.File]::ReadAllBytes($script:KeyA.KeyPath)
@@ -1581,7 +1569,7 @@ function Invoke-VerifyTrack {
     }
 
     Write-Host ''
-    Write-Host "-- 隱藏案例（由規格不變量推導，$TrackLabel）--" -ForegroundColor Cyan
+    Write-Host '-- 隱藏案例（由規格不變量推導）--' -ForegroundColor Cyan
 
     Invoke-TCase 'C36' '0 byte 檔單獨打包 roundtrip' {
         $src = New-BinFile (Join-Path $script:Work 'fixtures\zero\empty.dat') 0
@@ -1865,11 +1853,10 @@ function Invoke-VerifyTrack {
 }
 
 # ==============================================================================
-# 10. 驅動兩軌
+# 10. 驅動
 # ==============================================================================
 
-Invoke-VerifyTrack -TrackLabel 'ALL' -SealScript $script:AllScript -OpenScript $script:AllScript
-Invoke-VerifyTrack -TrackLabel 'SPLIT' -SealScript $script:SealScript -OpenScript $script:OpenScript
+Invoke-VerifyTrack -SealScript $script:SealScript -OpenScript $script:OpenScript
 
 # ==============================================================================
 # 11. 報表
@@ -1895,13 +1882,13 @@ if ($script:EscapeNotes.Count) {
     $script:EscapeNotes | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
 }
 
-Write-Host ('總計 {0} 案（ALL + SPLIT 兩軌合計）：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
+Write-Host ('總計 {0} 案：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 Write-Host ('工作目錄：{0}' -f $script:Work)
 
 $reportPath = Join-Path $script:ReviewRoot 'verify-report.txt'
 $logPath = Join-Path $script:ReviewRoot 'verify-log.txt'
 $sb = [System.Text.StringBuilder]::new()
-[void]$sb.AppendLine('runepost 驗收報表（規格 v2，雙軌 ALL + SPLIT）')
+[void]$sb.AppendLine('runepost 驗收報表（規格 v2，rune-seal + rune-open）')
 [void]$sb.AppendLine('RepoRoot：' + $script:RepoRoot)
 [void]$sb.AppendLine('時間：' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 [void]$sb.AppendLine('')

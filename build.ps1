@@ -52,10 +52,8 @@ if ([string]::IsNullOrWhiteSpace($OutDir)) {
 # 1. manifest —— 唯一的產物組成清單，build.ps1 絕不 glob src/
 #    key = 產物基底名（dist\<key>.ps1）；value = 依序組裝的 fragment 相對路徑陣列
 #
-#    M5a（雙軌期）：rune-seal / rune-open 是兩個真正的產物；rune-all 暫時保留
-#    作為對照組——若 seal / open 紅而 all 綠，問題必在 manifest 收錄而非程式邏輯。
-#    等 verify.ps1 證明三者等價後，下一顆（M5b）才移除 rune-all 與其專屬的
-#    shell/all-*.ps1。
+#    兩個產物：rune-seal（加密端）、rune-open（解密端 + 金鑰管理）。
+#    雙軌期的合體版 rune-all 已在 verify.ps1 證明與兩者等價後移除（見 git log）。
 # ==========================================================================
 $Script:Manifest = [ordered]@{
     'rune-seal' = @(
@@ -117,50 +115,6 @@ $Script:Manifest = [ordered]@{
         'keystore/export-public-key.ps1'
         # --- shell：進入點 ---
         'shell/open-entry.ps1'
-    )
-    'rune-all' = @(
-        # --- shell：合體版專用的 help / param（等同原 transfer.ps1 1–72 行）---
-        'shell/all-help.ps1'
-        'shell/all-param.ps1'
-        # --- keystore：金鑰路徑說明與常數（seal / open 共用）---
-        'keystore/paths-doc.ps1'
-        # --- container：容器格式常數 ---
-        'container/format-spec.ps1'
-        'keystore/paths.ps1'
-        # --- container：位元組工具（open 用）---
-        'container/byte-range.ps1'
-        # --- filemode：打包 / ZIP 寫入（seal 用）---
-        'filemode/pack-plan.ps1'
-        'filemode/zip-write.ps1'
-        # --- codec：Brotli 壓縮方向（seal 用）---
-        'codec/brotli-compress.ps1'
-        # --- crypto / keystore：金鑰交換與派生（seal / open 共用）---
-        'crypto/ecdh-keygen.ps1'
-        'keystore/fingerprint.ps1'
-        'keystore/public-key.ps1'
-        'crypto/kdf.ps1'
-        'crypto/aes-seal.ps1'
-        # --- container：容器組裝（seal 用）---
-        'container/write.ps1'
-        # --- flow：-Pack 主流程 ---
-        'flow/seal-main.ps1'
-        # --- codec / crypto：Brotli 解壓、ECDH 協議（open 用）---
-        'codec/brotli-expand.ps1'
-        'crypto/ecdh-agree.ps1'
-        # --- container：容器解析（open 用）---
-        'container/read.ps1'
-        # --- filemode：ZIP 解包（open 用）---
-        'filemode/zip-read.ps1'
-        # --- keystore：私鑰載入（open 用）---
-        'keystore/private-key.ps1'
-        # --- flow：-Unpack 主流程 ---
-        'flow/open-main.ps1'
-        # --- keystore：-GenerateKeys / -ExportPublicKey ---
-        'keystore/public-key-block.ps1'
-        'keystore/generate-keys.ps1'
-        'keystore/export-public-key.ps1'
-        # --- shell：合體版進入點 ---
-        'shell/all-entry.ps1'
     )
 }
 
