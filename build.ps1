@@ -302,14 +302,32 @@ try {
                 $mismatches += "$p：磁碟上不存在 $outPath"
                 continue
             }
+            # 逐位元組比對，而不是「解碼成字串後比對」——後者會把 BOM 差異吃掉：
+            # UTF8Encoding.GetString 對「有 BOM」與「沒 BOM」的位元組陣列解碼結果
+            # 相同（GetString 不會自動辨識並跳過開頭的 EF BB BF），只比字串會讓
+            # -Check 對「BOM 被剝掉」這種改動視而不見，而 BOM 依 DESIGN §4.3 是
+            # dist/ 的硬性要求（沒有 BOM，Windows PowerShell 5.1 / ISE 會以系統
+            # ANSI 讀檔，中文全毀，且 #Requires 在解析之後才生效，使用者只會看到
+            # 莫名其妙的解析錯誤）。
             $onDiskBytes = [System.IO.File]::ReadAllBytes($outPath)
-            $onDiskText = $utf8Bom.GetString($onDiskBytes)
-            # 去除 BOM 字元（GetString 對含 BOM 的位元組陣列不會自動吃掉 U+FEFF）
-            if ($onDiskText.Length -gt 0 -and [int]$onDiskText[0] -eq 0xFEFF) {
-                $onDiskText = $onDiskText.Substring(1)
+            # GetBytes() 本身不含 BOM（只有 File.WriteAllText 之類會自動寫入
+            # encoding 的 preamble）；比對基準必須自己補回 GetPreamble()，否則
+            # 連正常寫出的檔案都會被誤判為「相異」。
+            $expectedBytes = [byte[]]($utf8Bom.GetPreamble() + $utf8Bom.GetBytes($built[$p].Full))
+            $bytesMatch = ($onDiskBytes.Length -eq $expectedBytes.Length)
+            if ($bytesMatch) {
+                for ($bi = 0; $bi -lt $onDiskBytes.Length; $bi++) {
+                    if ($onDiskBytes[$bi] -ne $expectedBytes[$bi]) { $bytesMatch = $false; break }
+                }
             }
-            $expected = $built[$p].Full
-            if ($onDiskText -ne $expected) {
+            if (-not $bytesMatch) {
+                # 逐位元組比對已經判定不符；以下只是為了給出「第幾行起相異」這種
+                # 人看得懂的訊息，用文字比對輔助定位，不影響上面的判準。
+                $onDiskText = $utf8Bom.GetString($onDiskBytes)
+                if ($onDiskText.Length -gt 0 -and [int]$onDiskText[0] -eq 0xFEFF) {
+                    $onDiskText = $onDiskText.Substring(1)
+                }
+                $expected = $built[$p].Full
                 $expLines = $expected -split "`n"
                 $actLines = $onDiskText -split "`n"
                 $firstDiff = 0
@@ -319,7 +337,10 @@ try {
                     $a = if ($i -lt $actLines.Count) { $actLines[$i] } else { $null }
                     if ($e -ne $a) { $firstDiff = $i + 1; break }
                 }
-                $mismatches += "$p：磁碟上的 $outPath 與 src/ 現況組裝結果不同，第 $firstDiff 行起相異"
+                $bomNote = if ($onDiskBytes.Length -lt 3 -or $onDiskBytes[0] -ne 0xEF -or $onDiskBytes[1] -ne 0xBB -or $onDiskBytes[2] -ne 0xBF) {
+                    '；檔頭缺少 UTF-8 BOM（EF BB BF）'
+                } else { '' }
+                $mismatches += "$p：磁碟上的 $outPath 與 src/ 現況組裝結果不同（逐位元組比對），第 $firstDiff 行起相異$bomNote"
             }
         }
         if ($mismatches.Count -gt 0) {
