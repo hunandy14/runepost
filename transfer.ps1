@@ -620,11 +620,51 @@ function Invoke-CtxtUnpack {
 }
 
 # ==========================================================================
-# 區塊：-GenerateKeys 主流程（骨架，待下一個里程碑實作）
+# 區塊：-GenerateKeys 主流程
 # ==========================================================================
 
 function Invoke-CtxtGenerateKeys {
-    throw '尚未實作：-GenerateKeys'
+    if (Test-Path -LiteralPath $Script:DefaultKeyFile) {
+        throw "私鑰檔案已存在，為避免覆蓋既有金鑰（可能導致已加密的舊檔案永久無法解密），已拒絕操作：$($Script:DefaultKeyFile)`n如確定要產生新金鑰，請先手動備份／移除該檔案後再重新執行。"
+    }
+
+    if (-not (Test-Path -LiteralPath $Script:DefaultKeyDir)) {
+        New-Item -ItemType Directory -Path $Script:DefaultKeyDir -Force | Out-Null
+    }
+
+    Write-Host '產生 RSA-4096 金鑰對中，請稍候...'
+    $rsa = [System.Security.Cryptography.RSA]::Create(4096)
+    try {
+        $securePwd = Read-Host -Prompt '設定私鑰保護密碼（可留空，直接按 Enter 略過＝不加密私鑰）' -AsSecureString
+        $plainPwd = [System.Net.NetworkCredential]::new('', $securePwd).Password
+
+        if ([string]::IsNullOrEmpty($plainPwd)) {
+            $privatePem = $rsa.ExportPkcs8PrivateKeyPem()
+        }
+        else {
+            $pbeParams = [System.Security.Cryptography.PbeParameters]::new(
+                [System.Security.Cryptography.PbeEncryptionAlgorithm]::Aes256Cbc,
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                600000)
+            $privatePem = $rsa.ExportEncryptedPkcs8PrivateKeyPem($plainPwd, $pbeParams)
+        }
+        $plainPwd = $null
+
+        [System.IO.File]::WriteAllText($Script:DefaultKeyFile, $privatePem)
+
+        $publicPem = $rsa.ExportSubjectPublicKeyInfoPem()
+    }
+    finally {
+        $rsa.Dispose()
+    }
+
+    Write-Host ''
+    Write-Host "私鑰已寫入：$($Script:DefaultKeyFile)"
+    Write-Host '請妥善保管此檔案並自行備份，遺失將無法解密任何已用對應公鑰加密的檔案。'
+    Write-Host ''
+    Write-Host '===== 請將以下公鑰 PEM 完整貼入 transfer.ps1 頂部的 $PublicKeyPem 變數（加密端使用）====='
+    Write-Host $publicPem
+    Write-Host '=========================================================================='
 }
 
 # ==========================================================================
