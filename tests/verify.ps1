@@ -1905,8 +1905,10 @@ if ($script:EscapeNotes.Count) {
 Write-Host ('總計 {0} 案：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 Write-Host ('工作目錄：{0}' -f $script:Work)
 
-$reportPath = Join-Path $script:ReviewRoot 'verify-report.txt'
-$logPath = Join-Path $script:ReviewRoot 'verify-log.txt'
+# 報表／log 跟著 -WorkRoot 走，不寫死在本腳本所在目錄——受審物常是唯讀 checkout，
+# 寫死在腳本目錄會在裡面留檔，甚至在唯讀掛載下直接寫入失敗。
+$reportPath = Join-Path $WorkRoot 'verify-report.txt'
+$logPath = Join-Path $WorkRoot 'verify-log.txt'
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('runepost 驗收報表（規格 v2，rune-seal + rune-open）')
 [void]$sb.AppendLine('RepoRoot：' + $script:RepoRoot)
