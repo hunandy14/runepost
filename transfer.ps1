@@ -600,6 +600,36 @@ function Expand-CtxtZip {
     }
 }
 
+function Move-CtxtExtractedTree {
+    <#
+        把 $SourceDir 底下的內容遞迴搬到 $DestDir（同名目錄就合併、同名檔案就覆蓋），
+        用於 -Unpack 的「先解到暫存資料夾，全部成功後才搬到正式 Destination」流程。
+    #>
+    param(
+        [string] $SourceDir,
+        [string] $DestDir
+    )
+
+    if (-not (Test-Path -LiteralPath $DestDir)) {
+        New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+    }
+
+    foreach ($child in Get-ChildItem -LiteralPath $SourceDir -Force) {
+        $targetPath = Join-Path -Path $DestDir -ChildPath $child.Name
+        if ($child.PSIsContainer) {
+            if (Test-Path -LiteralPath $targetPath -PathType Container) {
+                Move-CtxtExtractedTree -SourceDir $child.FullName -DestDir $targetPath
+            }
+            else {
+                Move-Item -LiteralPath $child.FullName -Destination $targetPath -Force
+            }
+        }
+        else {
+            Move-Item -LiteralPath $child.FullName -Destination $targetPath -Force
+        }
+    }
+}
+
 # ==========================================================================
 # 區塊：私鑰載入（-Unpack 用；DPAPI CurrentUser 保護的 Pkcs8 私鑰 blob）
 # ==========================================================================
@@ -721,16 +751,33 @@ function Invoke-CtxtUnpack {
         throw "Brotli 解壓縮失敗：資料可能已損壞（$($_.Exception.Message)）"
     }
 
+    # 先解到 Destination 底下的暫存資料夾，全部成功後才搬到正式位置；
+    # 任何一步失敗都清掉暫存資料夾並報錯，Destination 不留半成品。
+    $tmpDir = Join-Path -Path $DestinationPath -ChildPath (".ctxt-tmp-" + [Guid]::NewGuid().ToString('N'))
     try {
-        Expand-CtxtZip -ZipBytes $zipBytes -Destination $DestinationPath
+        try {
+            Expand-CtxtZip -ZipBytes $zipBytes -Destination $tmpDir
+        }
+        catch [System.Security.SecurityException] {
+            # 路徑安全例外（zip-slip 等）要原樣往上拋，不可被包成「封裝格式錯誤或已損壞」，
+            # 以免使用者誤以為只是資料損毀而忽略了實際的安全性問題。
+            throw
+        }
+        catch {
+            throw "ZIP 解包失敗：封裝格式錯誤或已損壞（$($_.Exception.Message)）"
+        }
+
+        try {
+            Move-CtxtExtractedTree -SourceDir $tmpDir -DestDir $DestinationPath
+        }
+        catch {
+            throw "解包結果搬移失敗：無法將暫存資料夾內容搬到 $DestinationPath（$($_.Exception.Message)）"
+        }
     }
-    catch [System.Security.SecurityException] {
-        # 路徑安全例外（zip-slip 等）要原樣往上拋，不可被包成「封裝格式錯誤或已損壞」，
-        # 以免使用者誤以為只是資料損毀而忽略了實際的安全性問題。
-        throw
-    }
-    catch {
-        throw "ZIP 解包失敗：封裝格式錯誤或已損壞（$($_.Exception.Message)）"
+    finally {
+        if (Test-Path -LiteralPath $tmpDir) {
+            Remove-Item -LiteralPath $tmpDir -Recurse -Force
+        }
     }
 
     Write-Host "解密完成，檔案已還原至：$((Get-Item -LiteralPath $DestinationPath).FullName)"
