@@ -200,7 +200,7 @@ $script:ErrPatterns = @{
     key     = '私鑰|金鑰|key|解鑰|DPAPI|解不開|讀不到|無法讀取|無法解密|not found|decrypt|unprotect'
     tag     = '損壞|竄改|corrupt|tamper|驗證失敗|校驗|完整性|tag|GCM|authentication|內容'
     unzip   = '解壓|解壓縮|decompress|Brotli|brotli|壓縮|zip|ZIP|解包|封存|archive|損壞'
-    nopub   = '尚未設定公鑰|公鑰|PublicKeyPem|public key'
+    nopub   = '公鑰|public key|public\.pem'
     exists  = '已存在|存在|exists|Force|覆蓋|overwrite'
     nomatch = '找不到|沒有|未符合|不符合|沒有符合|no file|match|符合|空'
     input   = '找不到|不存在|not found|無效|invalid|路徑|path'
@@ -539,7 +539,9 @@ function Compress-Brotli {
 }
 
 # ==============================================================================
-# 6. 受測腳本副本與公鑰注入（AST 精準定位，絕不改原檔）
+# 6. 受測腳本解析
+#    公鑰改為執行期讀檔後，測試不再製作任何腳本副本、不再注入任何內容，
+#    一律直接對受測物原檔執行；此處只留下「內嵌是否已徹底移除」的偵測器。
 # ==============================================================================
 
 function Find-PublicKeyAssignment {
@@ -556,20 +558,6 @@ function Find-PublicKeyAssignment {
             ($left.VariablePath.UserPath -match '(^|:)PublicKeyPem$')
         }, $true)
     return @{ Ast = $ast; Errors = $e; Hit = ($hits | Select-Object -First 1) }
-}
-
-function New-ScriptCopy {
-    param([string]$SourcePath, [string]$DestPath, [string]$PemValue)
-    $text = [System.IO.File]::ReadAllText($SourcePath)
-    $f = Find-PublicKeyAssignment -Text $text
-    Assert ($null -ne $f.Hit) '受測腳本中找不到 $PublicKeyPem 的賦值敘述'
-    $s = $f.Hit.Right.Extent.StartOffset
-    $en = $f.Hit.Right.Extent.EndOffset
-    $lit = if ([string]::IsNullOrEmpty($PemValue)) { "''" } else { "@'`n" + $PemValue.Trim() + "`n'@" }
-    $new = $text.Substring(0, $s) + $lit + $text.Substring($en)
-    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($DestPath))
-    [System.IO.File]::WriteAllText($DestPath, $new, $script:Utf8Bom)
-    return $DestPath
 }
 
 # ==============================================================================
@@ -590,6 +578,7 @@ function New-HomeSandbox {
             LOCALAPPDATA = (New-Dir (Join-Path $dir 'AppData\Local'))
         }
         KeyPath = (Join-Path $dir '.rune\private.key')
+        PubPath = (Join-Path $dir '.rune\public.pem')
     }
 }
 
@@ -679,7 +668,6 @@ $script:WrapperPath = Join-Path $script:Work 'wrapper.ps1'
 
 $script:Sut = $null
 $script:SutKeyed = $null
-$script:SutEmpty = $null
 $script:KeyA = $null
 $script:KeyB = $null
 $script:PubPemA = $null
@@ -700,15 +688,14 @@ Invoke-Case 'P1' '受測腳本存在且語法可解析' {
     return ('{0}；{1} 位元組；語法 OK' -f (Split-Path -Leaf $script:Sut), (Get-Item -LiteralPath $script:Sut).Length)
 }
 
-Invoke-Case 'P2' '$PublicKeyPem 常數存在且原值為空' {
+Invoke-Case 'P2' '產物中不存在任何 $PublicKeyPem 賦值（公鑰已徹底外部化）' {
     Assert ($null -ne $script:Sut) '前置 P1 未通過'
     $text = [System.IO.File]::ReadAllText($script:Sut)
     $f = Find-PublicKeyAssignment -Text $text
-    Assert ($null -ne $f.Hit) '找不到 $PublicKeyPem 賦值'
-    $val = $f.Hit.Right.Extent.Text
-    $isEmpty = ($val -match "^\s*(''|`"`"|@'\s*'@|@`"\s*`"@|\`$null)\s*$")
-    Assert $isEmpty ('$PublicKeyPem 初始值不是空字串：' + (Squash $val 60))
-    return ('行 {0}，初值 {1}' -f $f.Hit.Extent.StartLineNumber, (Squash $val 24))
+    $where = if ($null -ne $f.Hit) { $f.Hit.Extent.StartLineNumber } else { 0 }
+    Assert ($null -eq $f.Hit) ('產物仍保留 $PublicKeyPem 賦值（行 {0}）：內嵌公鑰未徹底移除' -f $where)
+    Assert (-not ($text -match 'PublicKeyPem')) '產物仍出現 PublicKeyPem 字樣，內嵌公鑰的路徑未清乾淨'
+    return ('全檔無 $PublicKeyPem 賦值、無 PublicKeyPem 字樣；公鑰改為執行期讀取')
 }
 
 Invoke-Case 'P3' '家目錄沙箱可用（不污染真實 ~\.rune）' {
@@ -745,15 +732,22 @@ Invoke-Case 'P5' '產生第二組測試金鑰 B（供錯誤私鑰案例）' {
     return ('金鑰 B 就緒；與 A 的 blob 不同')
 }
 
-Invoke-Case 'P6' '把公鑰注入受測腳本副本（不改原檔）' {
+Invoke-Case 'P6' '沙箱家目錄已備妥 public.pem（不再製作任何腳本副本）' {
     Assert ($null -ne $script:PubPemA) '前置 P4 未通過'
     $before = Get-Sha $script:Sut
-    $script:SutKeyed = New-ScriptCopy -SourcePath $script:Sut -DestPath (Join-Path $script:Work 'sut_keyed\transfer.ps1') -PemValue $script:PubPemA
-    $script:SutEmpty = New-ScriptCopy -SourcePath $script:Sut -DestPath (Join-Path $script:Work 'sut_empty\transfer.ps1') -PemValue ''
-    $f = Find-PublicKeyAssignment -Text ([System.IO.File]::ReadAllText($script:SutKeyed))
-    Assert ($f.Errors.Count -eq 0) '注入後副本語法錯誤'
+    # 公鑰改為執行期讀檔後，加密端不需要客製化的腳本，一律直接對原檔執行。
+    # 變數名沿用 SutKeyed 以縮小本次 diff；拆成 seal / open 兩產物時再改其指向。
+    $script:SutKeyed = $script:Sut
+    $pub = $script:KeyA.Sandbox.PubPath
+    Assert ([System.IO.File]::Exists($pub)) "-GenerateKeys 未在沙箱家目錄寫出 public.pem：$pub"
+    $onDisk = Get-PemBlock -Text ([System.IO.File]::ReadAllText($pub))
+    Assert ($null -ne $onDisk) 'public.pem 內容不是合法的 PUBLIC KEY PEM 區塊'
+    $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
+    $ec.ImportFromPem($onDisk)
+    Assert ([Convert]::ToHexString($ec.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
+        'public.pem 內的公鑰與 -GenerateKeys 印出的 PEM 不是同一把'
     Assert ((Get-Sha $script:Sut) -eq $before) '原始受測腳本被修改了'
-    return ('副本 sut_keyed / sut_empty 已建立；原檔 SHA 未變')
+    return ('沙箱 ~\.rune\public.pem 就緒且與印出的公鑰一致；全程未製作任何腳本副本')
 }
 
 # 前置未過就沒有意義往下跑
@@ -1277,12 +1271,21 @@ else {
         return ("$ev；未產生輸出")
     }
 
-    Invoke-Case 'C23' '$PublicKeyPem 為空 → 報「尚未設定公鑰」' {
-        $r = Invoke-Transfer -ScriptPath $script:SutEmpty -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', (Join-Path $script:Work 'out\nopub.txt')) -EnvVars $script:KeyA.Sandbox.Env
-        Assert ($r.Failed) '公鑰未設定卻仍打包成功'
-        $hit = ($r.All -match '尚未設定公鑰') -or (($r.All -match '公鑰') -and ($r.All -match '尚未|未設定|沒有設定|未填'))
-        Assert $hit ('訊息未表達「尚未設定公鑰」：' + (Squash $r.All 180))
-        return (Squash $r.All 100)
+    Invoke-Case 'C23' '~\.rune\public.pem 不存在 → 報找不到公鑰且不產生輸出檔' {
+        $sb = New-HomeSandbox -Name 'nopub'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'nopub.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '家目錄沒有 public.pem 卻仍打包成功'
+        Assert (-not [System.IO.File]::Exists($out)) '找不到公鑰卻仍產生了輸出檔'
+        Assert ($r.All -match $script:ErrPatterns['nopub']) ('訊息未指明公鑰環節：' + (Squash $r.All 200))
+        Assert ($r.All -match '找不到|不存在|not found') ('訊息未說明公鑰檔不存在：' + (Squash $r.All 200))
+        # 訊息必須指引使用者「怎麼取得公鑰」，而不是只說找不到
+        Assert ($r.All -match 'GenerateKeys') ('訊息未指引到解密端執行 -GenerateKeys：' + (Squash $r.All 200))
+        Assert ($r.All -match 'public\.pem') ('訊息未提到 public.pem：' + (Squash $r.All 200))
+        Assert ($r.All -match '-PublicKey') ('訊息未提到可用 -PublicKey 指定路徑或 PEM 字串：' + (Squash $r.All 200))
+        return (Squash $r.All 130)
     }
 
     Invoke-Case 'C24' '輸入路徑不存在 → 報錯' {
@@ -1404,11 +1407,130 @@ else {
         return ("$ev；既有私鑰 SHA 未變")
     }
 
-    Invoke-Case 'C35' '-GenerateKeys 印出公鑰 PEM 與 $PublicKeyPem 貼上說明' {
+    Invoke-Case 'C35' '-GenerateKeys 印出公鑰 PEM、public.pem 路徑與指紋' {
         $o = $script:KeyA.Result.All
         Assert ($null -ne (Get-PemBlock -Text $o)) '未印出 PUBLIC KEY PEM'
-        Assert ($o -match 'PublicKeyPem') '未說明要貼進 $PublicKeyPem'
-        return (Squash (($o -split "`r?`n" | Where-Object { $_ -match 'PublicKeyPem' } | Select-Object -First 1)) 110)
+        Assert ($o -match 'public\.pem') '未指引使用者把 public.pem 交給加密端'
+        Assert ($o -match 'RUNE-KEY') '未印出公鑰指紋（RUNE-KEY ...），加密端無從比對'
+        return (Squash (($o -split "`r?`n" | Where-Object { $_ -match 'public\.pem|RUNE-KEY' } | Select-Object -First 1)) 110)
+    }
+
+    # 指紋格式：RUNE-KEY + 8 組 ×4 個大寫 hex，以 '-' 連接（共 39 字元）
+    $script:FpRegex = 'RUNE-KEY\s+([0-9A-F]{4}(?:-[0-9A-F]{4}){7})'
+
+    function Get-Fingerprint {
+        param([string]$Text)
+        $m = [regex]::Match($Text, $script:FpRegex)
+        if ($m.Success) { return $m.Groups[1].Value }
+        return $null
+    }
+
+    Invoke-Case 'C55' '-PublicKey 收 PEM 字串本體：家目錄無 public.pem 也能加密' {
+        $sb = New-HomeSandbox -Name 'pkstr'      # 這個沙箱刻意「沒有」public.pem
+        $src = Join-Path $script:Fx 'single\payload.bin'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'pkstring.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', $src, '-OutFile', $out, '-PublicKey', $script:PubPemA) -EnvVars $sb.Env
+        [void](Expect-Success $r 'Pack(-PublicKey 收 PEM 字串)')
+        $c = Read-Container $out
+        Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2 -and $c.ContentType -eq 1) '產物不是合法的 RUNE v2 容器'
+
+        $dest = New-Dir (Join-Path $script:Work 'unpack\pkstring')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(-PublicKey 收 PEM 字串)')
+        $d = Compare-MapExact @{ 'payload.bin' = (Get-Sha $src) } (Get-TreeMap $dest)
+        Assert ($null -eq $d) $d
+        return ('家目錄無 public.pem，僅靠 -PublicKey 的 PEM 字串完成加密，且以金鑰 A 位元一致還原')
+    }
+
+    Invoke-Case 'C56' '-PublicKey 收檔案路徑：可用非預設位置的公鑰檔' {
+        $sb = New-HomeSandbox -Name 'pkpath'     # 同樣沒有 public.pem
+        $pemFile = New-TextFile (Join-Path $script:Work 'keys\alice.pem') $script:PubPemA
+        $src = Join-Path $script:Fx 'single\payload.bin'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'pkpath.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', $src, '-OutFile', $out, '-PublicKey', $pemFile) -EnvVars $sb.Env
+        [void](Expect-Success $r 'Pack(-PublicKey 收檔案路徑)')
+
+        $dest = New-Dir (Join-Path $script:Work 'unpack\pkpath')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(-PublicKey 收檔案路徑)')
+        $d = Compare-MapExact @{ 'payload.bin' = (Get-Sha $src) } (Get-TreeMap $dest)
+        Assert ($null -eq $d) $d
+        return ('以 -PublicKey <路徑> 讀取非預設位置的公鑰檔，roundtrip 位元一致')
+    }
+
+    Invoke-Case 'C57' '公鑰指紋：格式穩定、seal 與 -GenerateKeys 逐字一致且可獨立重算' {
+        $genFp = Get-Fingerprint -Text $script:KeyA.Result.All
+        Assert ($null -ne $genFp) ('-GenerateKeys 未印出 RUNE-KEY 指紋（8 組 ×4 大寫 hex）：' + (Squash $script:KeyA.Result.All 200))
+
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'fp.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+        $p = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
+        [void](Expect-Success $p 'Pack(指紋)')
+        $sealFp = Get-Fingerprint -Text $p.StdOut
+        Assert ($null -ne $sealFp) ('-Pack 未印出 RUNE-KEY 指紋：' + (Squash $p.StdOut 200))
+        Assert ($sealFp.Length -eq 39) ('指紋長度不是 39 個字元：{0}' -f $sealFp.Length)
+        Assert ($sealFp -eq $genFp) ('加解密兩端的指紋不一致：seal={0} / generate={1}' -f $sealFp, $genFp)
+
+        # 獨立重算：SHA-256( SPKI DER ) 前 16 bytes，大寫 hex 每 4 字元一組
+        $digest = [System.Security.Cryptography.SHA256]::HashData($script:PubSpkiA)
+        $hex = [Convert]::ToHexString($digest, 0, 16)
+        $expect = ((0..7) | ForEach-Object { $hex.Substring($_ * 4, 4) }) -join '-'
+        Assert ($sealFp -eq $expect) ('指紋與 SHA-256(SPKI DER) 前 16 bytes 不符：實得 {0}，應為 {1}' -f $sealFp, $expect)
+        return ('RUNE-KEY {0}；兩端逐字一致且等於 SHA-256(SPKI DER)[0..15]' -f $expect)
+    }
+
+    Invoke-Case 'C58' '-ExportPublicKey 可從既有私鑰重建 public.pem，指紋不變' {
+        $pub = $script:KeyA.Sandbox.PubPath
+        Assert ([System.IO.File]::Exists($pub)) '前置 P6 未通過（沙箱沒有 public.pem）'
+        $backup = [System.IO.File]::ReadAllText($pub)
+        [System.IO.File]::Delete($pub)
+        try {
+            $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-ExportPublicKey') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
+            [void](Assert-NoHomeEscape -When 'C58')
+            [void](Expect-Success $r '-ExportPublicKey')
+            Assert ([System.IO.File]::Exists($pub)) '-ExportPublicKey 未重建 public.pem'
+            $onDisk = Get-PemBlock -Text ([System.IO.File]::ReadAllText($pub))
+            Assert ($null -ne $onDisk) '重建的 public.pem 不是合法 PEM'
+            $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
+            $ec.ImportFromPem($onDisk)
+            Assert ([Convert]::ToHexString($ec.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
+                '重建出來的公鑰不是原來那把'
+            $fp = Get-Fingerprint -Text $r.All
+            Assert ($null -ne $fp) '-ExportPublicKey 未以相同格式印出指紋'
+            Assert ($fp -eq (Get-Fingerprint -Text $script:KeyA.Result.All)) '重新導出後指紋改變了'
+            return ('public.pem 刪除後由私鑰完整重建，公鑰與指紋 RUNE-KEY {0} 皆不變' -f $fp)
+        }
+        finally {
+            # 後續案例仍依賴這個沙箱的 public.pem，萬一重建失敗要還原
+            if (-not [System.IO.File]::Exists($pub)) {
+                [System.IO.File]::WriteAllText($pub, $backup, $script:Utf8NoBom)
+            }
+        }
+    }
+
+    Invoke-Case 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' {
+        Assert ($null -ne $script:KeyB.PublicPem) '前置 P5 未取得金鑰 B 的公鑰'
+        $sb = New-HomeSandbox -Name 'swap'
+        [void](New-TextFile $sb.PubPath $script:KeyB.PublicPem)
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'swapped.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
+        [void](Expect-Success $r 'Pack(掉包後的 public.pem)')
+        $fpB = Get-Fingerprint -Text $r.StdOut
+        $fpA = Get-Fingerprint -Text $script:KeyA.Result.All
+        Assert ($null -ne $fpB) '換過公鑰後未印出指紋，使用者根本無從察覺'
+        Assert ($fpB -ne $fpA) ('公鑰被換掉指紋卻沒變（防線失效）：{0}' -f $fpB)
+
+        # 且產物確實是加密給 B：用 A 的私鑰解不開
+        $u = Invoke-UnpackOnly -Txt $out -KeyFile $script:KeyA.KeyPath -DestName 'swapped'
+        Assert ($u.Failed) '公鑰換成 B 之後，A 的私鑰竟然解得開'
+        Assert ((Get-TreeMap (Join-Path $script:Work 'unpack\swapped')).Count -eq 0) '解不開卻仍寫出檔案'
+        return ('A={0} → B={1}，指紋確實改變，且 A 的私鑰解不開' -f $fpA, $fpB)
     }
 
     Write-Host ''
@@ -1595,14 +1717,15 @@ else {
         return ('前 2 筆合法 + 第 3 筆不安全 -> 失敗且 Destination 完全乾淨；' + (Squash $r.All 70))
     }
 
-    Invoke-Case 'C45' '靜態公鑰非 P-256（注入 P-384）→ 須明確報曲線不符' {
+    Invoke-Case 'C45' 'public.pem 內容為 P-384 → 須明確報曲線不符' {
+        $sb = New-HomeSandbox -Name 'p384'
         $p384 = [System.Security.Cryptography.ECDiffieHellman]::Create([System.Security.Cryptography.ECCurve+NamedCurves]::nistP384)
         $pem = ConvertTo-Pem -Der $p384.ExportSubjectPublicKeyInfo() -Label 'PUBLIC KEY'
-        $copy = New-ScriptCopy -SourcePath $script:Sut -DestPath (Join-Path $script:Work 'sut_p384\transfer.ps1') -PemValue $pem
+        [void](New-TextFile $sb.PubPath $pem)
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'p384.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
 
-        $r = Invoke-Transfer -ScriptPath $copy -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
         Assert (-not $r.TimedOut) '逾時'
         Assert ($r.Failed) 'P-384 公鑰竟然被接受並完成打包'
         Assert (-not [System.IO.File]::Exists($out)) '曲線不符卻仍產生了輸出檔'
@@ -1610,7 +1733,7 @@ else {
         $errText = if (-not [string]::IsNullOrWhiteSpace($r.StdErr)) { $r.StdErr } else { $r.StdOut }
         Assert ($errText -match $script:ErrPatterns['curve']) `
         ('有拒絕但錯誤訊息未點明 P-256 曲線需求（丟出 .NET 原始訊息不算）：' + (Squash $errText 200))
-        return ('P-384 遭拒且錯誤訊息點明曲線：' + (Squash $errText 80))
+        return ('P-384 的 public.pem 遭拒且錯誤訊息點明曲線：' + (Squash $errText 80))
     }
 
     # ---- 針對 v1.1 新增邏輯的加強驗證（空目錄 entry / 回滾搬移 / 長路徑）----

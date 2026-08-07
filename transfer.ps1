@@ -7,13 +7,28 @@
     流程：打包（ZIP/store）→ 壓縮（Brotli）→ 加密（ECDH P-256 + HKDF-SHA256 派生 AES-256-GCM 金鑰）→ 文字編碼（Base64）。
     純 .NET 內建類別實作，零外部依賴，全程記憶體操作，不經 PowerShell 管道。
 
+    公鑰不內嵌在腳本裡，執行 -Pack 時才從 ~\.rune\public.pem 讀取（或以 -PublicKey 指定）。
+    因此本腳本是與金鑰無關的通用工具，任何人取得後配上自己的 public.pem 即可使用。
+
 .EXAMPLE
     .\transfer.ps1 -GenerateKeys
-    產生 ECDH P-256 金鑰對，私鑰以 DPAPI 保護後存到 ~\.rune\private.key，並在畫面印出公鑰 PEM。
+    產生 ECDH P-256 金鑰對：私鑰以 DPAPI 保護後存到 ~\.rune\private.key，公鑰同時寫到
+    ~\.rune\public.pem，並在畫面印出公鑰 PEM 與公鑰指紋。
+
+.EXAMPLE
+    .\transfer.ps1 -ExportPublicKey
+    從既有的 ~\.rune\private.key 重新導出公鑰，覆寫 ~\.rune\public.pem 並印出指紋。
+    public.pem 遺失時用這個補回來，也可以拿來隨時再看一次自己的指紋。
 
 .EXAMPLE
     .\transfer.ps1 -Pack C:\data\report.docx
-    將公鑰貼入 $PublicKeyPem 後，把單一檔案打包、壓縮、加密並輸出成 report.docx.txt。
+    把收件人的 public.pem 放到本機 ~\.rune\public.pem 後，將單一檔案打包、壓縮、加密
+    並輸出成 report.docx.txt。每次執行都會先印出所用公鑰的指紋，請與解密端核對。
+
+.EXAMPLE
+    .\transfer.ps1 -Pack C:\data\report.docx -PublicKey D:\keys\alice.pem
+    用指定路徑的公鑰檔加密。-PublicKey 也接受 PEM 字串本體（字串含 -----BEGIN 即視為
+    內容而非路徑）；多行 PEM 請用變數或 here-string 帶入，不要直接打在命令列上。
 
 .EXAMPLE
     .\transfer.ps1 -Unpack report.docx.txt -Destination C:\out
@@ -31,6 +46,11 @@ param(
     [Parameter(ParameterSetName = 'Pack')]
     [switch] $Force,
 
+    # 收件人公鑰：字串含 -----BEGIN 視為 PEM 內容本體，否則視為檔案路徑。
+    # 不指定時讀預設路徑 ~\.rune\public.pem。
+    [Parameter(ParameterSetName = 'Pack')]
+    [string] $PublicKey,
+
     [Parameter(ParameterSetName = 'Unpack', Mandatory = $true)]
     [string] $Unpack,
 
@@ -38,32 +58,40 @@ param(
     [string] $Destination,
 
     [Parameter(ParameterSetName = 'Unpack')]
+    [Parameter(ParameterSetName = 'ExportPublicKey')]
     [string] $KeyFile,
 
     [Parameter(ParameterSetName = 'GenerateKeys', Mandatory = $true)]
-    [switch] $GenerateKeys
+    [switch] $GenerateKeys,
+
+    [Parameter(ParameterSetName = 'ExportPublicKey', Mandatory = $true)]
+    [switch] $ExportPublicKey
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ==========================================================================
-# 公鑰設定區
+# 金鑰的取得與擺放（公鑰不內嵌在腳本裡）
 #
-# 使用方式：
-#   1. 先在「解密端」（保管私鑰的那台機器）執行：
+#   1. 在「解密端」（保管私鑰的那台機器）執行：
 #        pwsh .\transfer.ps1 -GenerateKeys
 #      私鑰（ECDH P-256）會以 DPAPI（CurrentUser）保護後寫到 ~\.rune\private.key，
-#      畫面會印出對應的公鑰 PEM。私鑰檔只有「同一台機器、同一個 Windows 帳號」
-#      能用 DPAPI 解回來，換機器或換帳號一律讀不開，因此不再需要另外設密碼。
-#   2. 把印出的 "-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----"
-#      完整貼到下面 $PublicKeyPem 這個 here-string 裡（保留左右單引號 @' / '@）。
-#   3. 把貼好公鑰的這份腳本複製/分發到「加密端」機器即可執行 -Pack。
+#      公鑰同時寫到 ~\.rune\public.pem，畫面另外印出公鑰 PEM 與「公鑰指紋」。
+#      私鑰檔只有「同一台機器、同一個 Windows 帳號」能用 DPAPI 解回來，
+#      換機器或換帳號一律讀不開，因此不需要另外設密碼。
+#   2. 把 public.pem 交給「加密端」，放到該機器的 ~\.rune\public.pem
+#      （或用 -PublicKey 指定其他路徑／直接給 PEM 字串本體）。
+#   3. 加密端每次執行 -Pack 都會先印出所用公鑰的指紋，請與解密端印出的逐字比對。
 #
-# 交付版此處必須保持空字串，-Pack 執行時偵測到空值會直接報錯，
-# 提醒使用者尚未完成設定，避免誤以為可以直接使用。
+# 為什麼不內嵌：內嵌只有兩種結果——交付出去的腳本帶著某個人的公鑰（別人拿到就是
+# 加密給他），或維持空字串（拿到不能用，人人都得先編輯腳本）。改成執行期讀檔後，
+# 本腳本是與金鑰無關的通用工具，任何人配上自己的 public.pem 即可使用。
+#
+# 為什麼要有指紋：公鑰檔被掉包會讓使用者靜默地把資料加密給攻擊者，而資料檔被換
+# 比腳本被改更難察覺——腳本有版本控管，~\.rune\public.pem 什麼都沒有。指紋是這條
+# 路徑上唯一的防線，所以 -Pack 每次都印，讓每一次執行都有機會發現異常。
 # ==========================================================================
-$PublicKeyPem = ''
 
 # ==========================================================================
 # 容器二進位格式（加密前於記憶體組好，再整體 Base64）：
@@ -81,7 +109,7 @@ $PublicKeyPem = ''
 #   以明文存放的代價只是洩漏「這是檔案還是文字」，而負載大小早就洩漏了同一件事。
 #
 #   金鑰交換／派生（version 2）：
-#     每次 -Pack 產生一次性 ephemeral ECDH P-256 金鑰對，與腳本內嵌的靜態
+#     每次 -Pack 產生一次性 ephemeral ECDH P-256 金鑰對，與執行期載入的收件人
 #     公鑰做 ECDH（DeriveRawSecretAgreement）得共享祕密；再以
 #     HKDF-SHA256(ikm = 共享祕密, salt = nonce,
 #                 info = magic + version + contentType + ephemeral公鑰DER)
@@ -110,6 +138,7 @@ $Script:NonceLength = 12
 $Script:TagLength = 16
 $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.rune'
 $Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.key'
+$Script:DefaultPublicKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'public.pem'
 $Script:P256CurveOid = '1.2.840.10045.3.1.7'
 
 # ==========================================================================
@@ -292,12 +321,56 @@ function New-RuneEcdhKeyPair {
         [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
 }
 
-function Get-RuneStaticPublicKey {
-    <# 從腳本內嵌的 $PublicKeyPem 載入靜態 ECDH 公鑰（只含公鑰），並驗證曲線為 P-256 #>
-    param([string] $PublicKeyPemText)
+function Get-RuneKeyFingerprint {
+    <#
+        公鑰指紋：SHA-256( SubjectPublicKeyInfo DER ) 取前 16 bytes（128 bits），
+        大寫 hex 每 4 字元一組、以 '-' 連接，共 8 組 39 個字元。
+
+        輸入取 SPKI DER 而非 PEM 文字，因為 DER 是正規、唯一的序列化（PEM 會因換行、
+        尾隨空白、標頭大小寫而變動），而且 DER 內含曲線 OID，指紋因此天生跨曲線域分離。
+        使用者也可以不信任本腳本，改用標準工具獨立驗證得到相同摘要：
+            openssl pkey -pubin -in public.pem -outform DER | openssl dgst -sha256
+        取 16 bytes 而非更短：指紋是公鑰替換攻擊的唯一防線，32 bits 可在筆電上分鐘級
+        磨出碰撞，64 bits 昂貴但非不可及，128 bits 則永久出局。
+    #>
+    param([byte[]] $SpkiDer)
+    $digest = [System.Security.Cryptography.SHA256]::HashData($SpkiDer)
+    $hex = [Convert]::ToHexString($digest, 0, 16)
+    $groups = for ($i = 0; $i -lt $hex.Length; $i += 4) { $hex.Substring($i, 4) }
+    return ($groups -join '-')
+}
+
+function Get-RunePublicKey {
+    <#
+        取得收件人公鑰（只含公鑰的 ECDH 物件），並驗證曲線為 P-256。
+
+        解析順序（-PublicKey 未指定時退回預設路徑 ~\.rune\public.pem）：
+          1. 字串含 -----BEGIN → 視為 PEM 內容本體
+          2. 否則               → 視為檔案路徑
+    #>
+    param([string] $PublicKeyRef)
+
+    if ([string]::IsNullOrWhiteSpace($PublicKeyRef)) {
+        $path = $Script:DefaultPublicKeyFile
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "找不到公鑰：$path。請先在解密端執行 rune-open.ps1 -GenerateKeys，把印出的 public.pem 複製到本機 $path，或用 -PublicKey 指定路徑或 PEM 字串。"
+        }
+        $pemText = [System.IO.File]::ReadAllText($path)
+    }
+    elseif ($PublicKeyRef -match '-----BEGIN') {
+        $pemText = $PublicKeyRef
+    }
+    else {
+        $path = $PublicKeyRef
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "找不到公鑰：$path。請先在解密端執行 rune-open.ps1 -GenerateKeys，把印出的 public.pem 複製到本機 $path，或用 -PublicKey 指定路徑或 PEM 字串。"
+        }
+        $pemText = [System.IO.File]::ReadAllText($path)
+    }
+
     $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
     try {
-        $ecdh.ImportFromPem($PublicKeyPemText)
+        $ecdh.ImportFromPem($pemText)
     }
     catch {
         $ecdh.Dispose()
@@ -407,12 +480,17 @@ function Invoke-RuneSeal {
     param(
         [string] $PackPath,
         [string] $OutFilePath,
+        [string] $PublicKeyRef,
         [switch] $ForceOverwrite
     )
 
-    if ([string]::IsNullOrWhiteSpace($PublicKeyPem)) {
-        throw '尚未設定公鑰：請先在解密端執行 -GenerateKeys 產生金鑰對，並將印出的公鑰 PEM 貼入本腳本頂部的 $PublicKeyPem 變數後再重新執行 -Pack。'
-    }
+    # 公鑰在最前面就載入並印出指紋：三種失敗（找不到公鑰檔、PEM 格式無效、曲線非
+    # P-256）都必須在產生任何輸出檔之前結束；指紋每次執行都印，讓使用者每次都有
+    # 機會發現 public.pem 被掉包。
+    $staticPub = Get-RunePublicKey -PublicKeyRef $PublicKeyRef
+    $recipientSpki = $staticPub.ExportSubjectPublicKeyInfo()
+    Write-Host ('收件人公鑰指紋：RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $recipientSpki))
+    Write-Host '（請與解密端 -GenerateKeys / -ExportPublicKey 印出的指紋逐字比對；不符代表公鑰可能已被掉包）'
 
     $plan = Get-RunePackPlan -PackPath $PackPath
     if (-not $plan.Entries -or $plan.Entries.Count -eq 0) {
@@ -440,7 +518,6 @@ function Invoke-RuneSeal {
 
     Write-Host '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
     $ephemeral = New-RuneEcdhKeyPair
-    $staticPub = Get-RuneStaticPublicKey -PublicKeyPemText $PublicKeyPem
     $aesKey = $null
     try {
         $sharedSecret = $ephemeral.DeriveRawSecretAgreement($staticPub.PublicKey)
@@ -857,13 +934,32 @@ function Invoke-RuneOpen {
 }
 
 # ==========================================================================
-# 區塊：-GenerateKeys 主流程
+# 區塊：-GenerateKeys / -ExportPublicKey 主流程
 # ==========================================================================
 
+function Write-RunePublicKeyBlock {
+    <# 統一的公鑰輸出格式：PEM 全文 + 指紋。兩端要比對的就是這個指紋，所以格式必須一致。 #>
+    param(
+        [string] $PublicPem,
+        [byte[]] $SpkiDer
+    )
+    Write-Host "公鑰已寫入：$($Script:DefaultPublicKeyFile)"
+    Write-Host '請把這個檔案（或以下 PEM 全文）交給加密端，放到該機器的 ~\.rune\public.pem。'
+    Write-Host ''
+    Write-Host '===== 公鑰 PEM（加密端使用）====='
+    Write-Host $PublicPem
+    Write-Host '================================'
+    Write-Host ('公鑰指紋：RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $SpkiDer))
+    Write-Host '加密端每次 -Pack 都會印出同格式的指紋，請逐字比對；不符代表公鑰在傳遞過程中被掉包。'
+}
+
 function Invoke-RuneGenerateKeys {
+    # 私鑰已存在一律拒絕：覆蓋私鑰會讓已加密的舊檔案永久無法解密，這條資料遺失防護不變。
     if (Test-Path -LiteralPath $Script:DefaultKeyFile) {
         throw "私鑰檔案已存在，為避免覆蓋既有金鑰（可能導致已加密的舊檔案永久無法解密），已拒絕操作：$($Script:DefaultKeyFile)`n如確定要產生新金鑰，請先手動備份／移除該檔案後再重新執行。"
     }
+    # 私鑰不存在但 public.pem 還在：直接覆蓋。孤兒 public.pem（私鑰已遺失）比沒有檔案
+    # 更危險——加密端會持續加密給一把沒人持有的金鑰，產出永久無法解讀的密文。
 
     if (-not (Test-Path -LiteralPath $Script:DefaultKeyDir)) {
         New-Item -ItemType Directory -Path $Script:DefaultKeyDir -Force | Out-Null
@@ -877,9 +973,13 @@ function Invoke-RuneGenerateKeys {
         $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
             $pkcs8Bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
 
+        # 寫入順序固定「先私鑰、後公鑰」：若 public.pem 寫入失敗，private.key 仍在，
+        # 可用 -ExportPublicKey 補救；反序則會留下一把沒有對應私鑰的公鑰。
         [System.IO.File]::WriteAllBytes($Script:DefaultKeyFile, $protectedBytes)
 
         $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
+        $spkiDer = $ecdh.ExportSubjectPublicKeyInfo()
+        [System.IO.File]::WriteAllText($Script:DefaultPublicKeyFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
     }
     finally {
         if ($pkcs8Bytes) {
@@ -893,9 +993,35 @@ function Invoke-RuneGenerateKeys {
     Write-Host '此檔案只有在這台機器、這個 Windows 帳號下才解得開；請自行備份，'
     Write-Host '遺失或搬到別的機器／帳號，將無法解密任何已用對應公鑰加密的檔案。'
     Write-Host ''
-    Write-Host '===== 請將以下公鑰 PEM 完整貼入 transfer.ps1 頂部的 $PublicKeyPem 變數（加密端使用）====='
-    Write-Host $publicPem
-    Write-Host '=========================================================================='
+    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer
+}
+
+function Invoke-RuneExportPublicKey {
+    <#
+        從既有私鑰重新導出公鑰並「自由覆寫」public.pem。
+
+        存在的必要性：public.pem 由 private.key 可完全重現，因此不珍貴、覆寫無風險；
+        但 -GenerateKeys 在私鑰存在時一律拒絕，沒有這個模式的話，使用者一旦刪掉或
+        遺失 public.pem 就再也生不回來。兼作「再印一次我的指紋」的工具。
+    #>
+    param([string] $KeyFilePath)
+
+    $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath
+    try {
+        $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
+        $spkiDer = $ecdh.ExportSubjectPublicKeyInfo()
+    }
+    finally {
+        $ecdh.Dispose()
+    }
+
+    if (-not (Test-Path -LiteralPath $Script:DefaultKeyDir)) {
+        New-Item -ItemType Directory -Path $Script:DefaultKeyDir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText($Script:DefaultPublicKeyFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
+
+    Write-Host ''
+    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer
 }
 
 # ==========================================================================
@@ -907,8 +1033,11 @@ try {
         'GenerateKeys' {
             Invoke-RuneGenerateKeys
         }
+        'ExportPublicKey' {
+            Invoke-RuneExportPublicKey -KeyFilePath $KeyFile
+        }
         'Pack' {
-            Invoke-RuneSeal -PackPath $Pack -OutFilePath $OutFile -ForceOverwrite:$Force
+            Invoke-RuneSeal -PackPath $Pack -OutFilePath $OutFile -PublicKeyRef $PublicKey -ForceOverwrite:$Force
         }
         'Unpack' {
             Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination -KeyFilePath $KeyFile
