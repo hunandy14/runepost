@@ -67,17 +67,34 @@ $PublicKeyPem = ''
 
 # ==========================================================================
 # 容器二進位格式（加密前於記憶體組好，再整體 Base64）：
-#   magic "RUNE"(4B ASCII) | version 0x02(1B) | ephPubKeyLen(uint16 LE)
+#   magic "RUNE"(4B ASCII) | version 0x02(1B) | contentType(1B) | ephPubKeyLen(uint16 LE)
 #   | ephemeral ECDH P-256 公鑰（SubjectPublicKeyInfo DER）| nonce(12B) | tag(16B) | ciphertext
-#   明文側被加密的內容 = Brotli( Zip( 輸入 ) )
+#
+#   欄位位移：magic@0 version@4 contentType@5 ephPubKeyLen@6 ephPubKey@8
+#            nonce@8+n tag@20+n ciphertext@36+n（n = ephPubKeyLen），header 最小長度 8。
+#
+#   contentType（1 byte，明文）：
+#     0x01 = 檔案樹，明文側被加密的內容 = Brotli( Zip( 輸入 ) )
+#     0x02 = UTF-8 純文字，明文側 = Brotli( UTF8( 文字 ) )，無 ZIP 層【保留，本版尚未實作】
+#   放在 version 之後，是為了讓 magic+version（byte 0–4）成為所有版本共通、永遠可解析的
+#   前綴；未來版本可自 byte 5 起重新定義而不失去「這是 Rune 檔、版本是 N」的判讀能力。
+#   以明文存放的代價只是洩漏「這是檔案還是文字」，而負載大小早就洩漏了同一件事。
 #
 #   金鑰交換／派生（version 2）：
 #     每次 -Pack 產生一次性 ephemeral ECDH P-256 金鑰對，與腳本內嵌的靜態
 #     公鑰做 ECDH（DeriveRawSecretAgreement）得共享祕密；再以
-#     HKDF-SHA256(ikm = 共享祕密, salt = nonce, info = magic+version+ephemeral公鑰DER)
+#     HKDF-SHA256(ikm = 共享祕密, salt = nonce,
+#                 info = magic + version + contentType + ephemeral公鑰DER)
 #     派生 32 bytes 的 AES-256-GCM 金鑰。salt 選用 nonce（而非空）是為了讓每次
-#     Pack 產生的金鑰額外與該次的 nonce 綁定；info 內含 magic/version/ephemeral
-#     公鑰，確保派生結果與容器內容一一對應、不可跨欄位替換。
+#     Pack 產生的金鑰額外與該次的 nonce 綁定；info 內含 magic/version/contentType/
+#     ephemeral 公鑰，確保派生結果與容器內容一一對應、不可跨欄位替換。
+#
+#   【contentType 必須進 HKDF info】本工具的 AES-GCM 未使用 AAD，tag 只涵蓋 ciphertext，
+#   涵蓋不到 header 任何一個 byte。若 contentType 不進 info，攻擊者把 0x01 翻成 0x02
+#   後 tag 仍會驗過，解密端就會把一串 ZIP 位元組當成 UTF-8 文字處理——這是 content-type
+#   confusion。綁進 info 之後，翻位元 → 派生金鑰不同 → tag 不符，直接走既有的認證失敗路徑。
+#   也因此「型別是否支援」的檢查必須放在 GCM 解密成功之後（見 Invoke-RuneOpen）：
+#   tag 驗過就等於這個 byte 是真品，此時值仍未知才能斷定是版本落後而非資料被竄改。
 #
 #   【新舊互斥】RUNE v2 與舊工具的 CTXT v2 無血緣關係，version 編號重用純屬巧合，
 #   兩者靠 magic 互斥：magic 檢查排在 version 檢查之前（見 ConvertFrom-RuneContainer），
@@ -86,6 +103,9 @@ $PublicKeyPem = ''
 # ==========================================================================
 $Script:RuneMagic = 'RUNE'
 $Script:RuneVersion = [byte] 2
+# 內容型別列舉：0x01 檔案樹（本版唯一會產生也唯一支援的型別）、0x02 UTF-8 純文字（保留）
+$Script:ContentTypeFileTree = [byte] 1
+$Script:ContentTypeText = [byte] 2
 $Script:NonceLength = 12
 $Script:TagLength = 16
 $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.rune'
@@ -294,18 +314,26 @@ function Get-RuneStaticPublicKey {
 }
 
 function Get-RuneHkdfInfo {
-    <# HKDF 的 info：magic + version + ephemeral 公鑰 DER 位元組 #>
-    param([byte[]] $EphPubKeyDer)
+    <#
+        HKDF 的 info：magic + version + contentType + ephemeral 公鑰 DER 位元組。
+        contentType 必須在其中——GCM 未使用 AAD，header 不受 tag 保護，
+        只有綁進金鑰派生才能讓型別位元被竄改時直接表現為認證失敗。
+    #>
+    param(
+        [byte] $ContentType,
+        [byte[]] $EphPubKeyDer
+    )
     $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:RuneMagic)
-    $info = [byte[]]::new($magicBytes.Length + 1 + $EphPubKeyDer.Length)
+    $info = [byte[]]::new($magicBytes.Length + 1 + 1 + $EphPubKeyDer.Length)
     [System.Buffer]::BlockCopy($magicBytes, 0, $info, 0, $magicBytes.Length)
     $info[$magicBytes.Length] = $Script:RuneVersion
-    [System.Buffer]::BlockCopy($EphPubKeyDer, 0, $info, $magicBytes.Length + 1, $EphPubKeyDer.Length)
+    $info[$magicBytes.Length + 1] = $ContentType
+    [System.Buffer]::BlockCopy($EphPubKeyDer, 0, $info, $magicBytes.Length + 2, $EphPubKeyDer.Length)
     return , $info
 }
 
 function Get-RuneDerivedAesKey {
-    <# HKDF-SHA256(ikm=共享祕密, salt=nonce, info=magic+version+ephemeral公鑰) -> 32B AES 金鑰 #>
+    <# HKDF-SHA256(ikm=共享祕密, salt=nonce, info=magic+version+contentType+ephemeral公鑰) -> 32B AES 金鑰 #>
     param(
         [byte[]] $SharedSecret,
         [byte[]] $Nonce,
@@ -346,6 +374,7 @@ function Protect-RuneAesGcm {
 
 function New-RuneContainer {
     param(
+        [byte] $ContentType,
         [byte[]] $EphPubKey,
         [byte[]] $Nonce,
         [byte[]] $Tag,
@@ -361,6 +390,7 @@ function New-RuneContainer {
     $ms = [System.IO.MemoryStream]::new()
     $ms.Write($magicBytes, 0, $magicBytes.Length)
     $ms.WriteByte($Script:RuneVersion)
+    $ms.WriteByte($ContentType)
     $ms.Write($lenBytes, 0, 2)
     $ms.Write($EphPubKey, 0, $EphPubKey.Length)
     $ms.Write($Nonce, 0, $Nonce.Length)
@@ -419,7 +449,7 @@ function Invoke-RuneSeal {
         $nonce = [byte[]]::new($Script:NonceLength)
         [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
 
-        $infoBytes = Get-RuneHkdfInfo -EphPubKeyDer $ephPubKeyDer
+        $infoBytes = Get-RuneHkdfInfo -ContentType $Script:ContentTypeFileTree -EphPubKeyDer $ephPubKeyDer
         $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $nonce -InfoBytes $infoBytes
         [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
@@ -435,7 +465,9 @@ function Invoke-RuneSeal {
         $staticPub.Dispose()
     }
 
-    $container = New-RuneContainer -EphPubKey $ephPubKeyDer -Nonce $nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
+    # 本版的 -Pack 一律產生檔案樹型別（0x01）；0x02 純文字保留給後續版本。
+    $container = New-RuneContainer -ContentType $Script:ContentTypeFileTree -EphPubKey $ephPubKeyDer `
+        -Nonce $nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
 
     $b64Text = [Convert]::ToBase64String($container, [System.Base64FormattingOptions]::InsertLineBreaks)
     [System.IO.File]::WriteAllText($OutFilePath, $b64Text, [System.Text.Encoding]::ASCII)
@@ -503,9 +535,14 @@ function Get-RuneSharedSecretForDecrypt {
 # ==========================================================================
 
 function ConvertFrom-RuneContainer {
+    <#
+        只擷取欄位，不做內容型別的合法性驗證：contentType 的 0x00–0xFF 任何值都照原樣
+        回傳。型別是否支援必須等 GCM 認證通過之後才能判定，否則「位元被竄改」會被誤報成
+        「不支援的內容型別」（詳見 Invoke-RuneOpen）。
+    #>
     param([byte[]] $Bytes)
 
-    $headerMin = 4 + 1 + 2
+    $headerMin = 4 + 1 + 1 + 2
     if ($Bytes.Length -lt $headerMin) {
         throw '容器格式錯誤：檔頭長度不足，檔案可能已損壞或被截斷'
     }
@@ -520,10 +557,12 @@ function ConvertFrom-RuneContainer {
         throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:RuneVersion)"
     }
 
+    $contentType = $Bytes[5]
+
     # 明確指定小端序讀取，對應寫入端 New-RuneContainer 的 WriteUInt16LittleEndian
-    $ephPubKeyLenBytes = Get-ByteRange -Source $Bytes -Offset 5 -Length 2
+    $ephPubKeyLenBytes = Get-ByteRange -Source $Bytes -Offset 6 -Length 2
     $ephPubKeyLen = [System.Buffers.Binary.BinaryPrimitives]::ReadUInt16LittleEndian($ephPubKeyLenBytes)
-    $offset = 7
+    $offset = 8
     $minTotal = $offset + $ephPubKeyLen + $Script:NonceLength + $Script:TagLength
     if ($Bytes.Length -lt $minTotal) {
         throw '容器格式錯誤：長度不足以包含完整的 ephemeral 公鑰／nonce／tag，檔案可能已損壞或被截斷'
@@ -539,10 +578,11 @@ function ConvertFrom-RuneContainer {
     $ciphertext = Get-ByteRange -Source $Bytes -Offset $offset -Length $ciphertextLen
 
     return [pscustomobject]@{
-        EphPubKey  = $ephPubKey
-        Nonce      = $nonce
-        Tag        = $tag
-        Ciphertext = $ciphertext
+        ContentType = $contentType
+        EphPubKey   = $ephPubKey
+        Nonce       = $nonce
+        Tag         = $tag
+        Ciphertext  = $ciphertext
     }
 }
 
@@ -747,7 +787,7 @@ function Invoke-RuneOpen {
     finally {
         $ecdh.Dispose()
     }
-    $infoBytes = Get-RuneHkdfInfo -EphPubKeyDer $parsed.EphPubKey
+    $infoBytes = Get-RuneHkdfInfo -ContentType $parsed.ContentType -EphPubKeyDer $parsed.EphPubKey
     $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $parsed.Nonce -InfoBytes $infoBytes
     [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
@@ -767,6 +807,14 @@ function Invoke-RuneOpen {
     }
     catch {
         throw "GCM 解密失敗：內容可能已損壞（$($_.Exception.Message)）"
+    }
+
+    # 內容型別的合法性檢查必須在此——GCM 認證通過之後、解壓之前。
+    # contentType 已綁進 HKDF info，tag 驗過就等於這個 byte 是真品；此時值仍未知，
+    # 才能斷定是本程式版本落後，而不是資料被竄改。若把這個檢查提前到解析階段，
+    # 「位元被翻掉」會被誤報成「不支援的內容型別」，使用者就抓不到真正的問題。
+    if ($parsed.ContentType -ne $Script:ContentTypeFileTree) {
+        throw ('本容器的內容型別 0x{0:X2} 由較新版本的 Rune 產生，請更新 rune-open.ps1' -f $parsed.ContentType)
     }
 
     try {

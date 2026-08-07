@@ -317,11 +317,12 @@ function Read-Container {
     $b64 = ($lines -join '')
     $bytes = [Convert]::FromBase64String($b64)
 
-    Assert ($bytes.Length -ge 7 + 12 + 16) "容器長度過短：$($bytes.Length)B"
+    Assert ($bytes.Length -ge 8 + 12 + 16) "容器長度過短：$($bytes.Length)B"
     $magic = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4)
     $version = $bytes[4]
-    $epkLen = [int]$bytes[5] -bor ([int]$bytes[6] -shl 8)
-    $o = 7
+    $contentType = $bytes[5]
+    $epkLen = [int]$bytes[6] -bor ([int]$bytes[7] -shl 8)
+    $o = 8
     $epk = if ($epkLen -gt 0 -and ($o + $epkLen) -le $bytes.Length) { $bytes[$o..($o + $epkLen - 1)] } else { @() }
     $o += $epkLen
     $nonce = if (($o + 12) -le $bytes.Length) { $bytes[$o..($o + 11)] } else { @() }
@@ -337,12 +338,13 @@ function Read-Container {
         Bytes      = $bytes
         Magic      = $magic
         Version    = $version
+        ContentType = $contentType
         EpkLen     = $epkLen
         Epk        = [byte[]]$epk
         Nonce      = [byte[]]$nonce
         Tag        = [byte[]]$tag
         Cipher     = [byte[]]$ct
-        HeaderSize = 7 + $epkLen
+        HeaderSize = 8 + $epkLen
     }
 }
 
@@ -464,6 +466,8 @@ function Get-KdfCandidates {
         'epk'     = $Container.Epk
         'epk+rpk' = [byte[]](@($Container.Epk) + @($RecipientSpki))
         'magicver+epk' = [byte[]](@($Container.Bytes[0..4]) + @($Container.Epk))
+        'magicver+ctype' = [byte[]]($Container.Bytes[0..5])
+        'magicver+ctype+epk' = [byte[]](@($Container.Bytes[0..5]) + @($Container.Epk))
         'magic+epk' = [byte[]](@($Container.Bytes[0..3]) + @($Container.Epk))
         'transfer' = $u.GetBytes('transfer.ps1')
     }
@@ -853,7 +857,7 @@ function New-ZipWithDirEntry {
 
 # 以受測物的收件人公鑰 + C08 還原出的 KDF 參數，偽造一個「密碼學上完全合法」的容器
 function New-ForgedRune {
-    param([byte[]]$ZipBytes, [string]$Path)
+    param([byte[]]$ZipBytes, [string]$Path, [byte]$ContentType = 1)
     Assert ($null -ne $script:KdfInfo) '需 C08 還原 KDF 參數'
     $plain = Compress-Brotli -Data $ZipBytes
 
@@ -867,6 +871,7 @@ function New-ForgedRune {
     $hdr = [System.Collections.Generic.List[byte]]::new()
     $hdr.AddRange([System.Text.Encoding]::ASCII.GetBytes('RUNE'))
     $hdr.Add(2)
+    $hdr.Add($ContentType)     # contentType（預設 0x01 = 檔案樹）
     $hdr.Add([byte]($epk.Length -band 0xFF)); $hdr.Add([byte](($epk.Length -shr 8) -band 0xFF))
     $hdr.AddRange($epk)
 
@@ -953,10 +958,21 @@ else {
         Assert ($c.Nonce.Length -eq 12) 'nonce 長度不是 12'
         Assert ($c.Tag.Length -eq 16) 'tag 長度不是 16'
         Assert ($c.Cipher.Length -gt 0) 'ciphertext 為空'
-        $expLen = 7 + $c.EpkLen + 12 + 16 + $c.Cipher.Length
+        $expLen = 8 + $c.EpkLen + 12 + 16 + $c.Cipher.Length
         Assert ($expLen -eq $c.Bytes.Length) "長度不自洽：$expLen vs $($c.Bytes.Length)"
         return ('magic=RUNE ver=0x02 epkLen={0}(uint16 LE) der=0x30 nonce@{1} tag@{2} ct={3}B 總長自洽' -f `
-                $c.EpkLen, (7 + $c.EpkLen), (7 + $c.EpkLen + 12), $c.Cipher.Length)
+                $c.EpkLen, (8 + $c.EpkLen), (8 + $c.EpkLen + 12), $c.Cipher.Length)
+    }
+
+    Invoke-Case 'C51' 'contentType 欄位：byte[5] = 0x01（檔案樹），header 最小長度 8' {
+        Assert ($null -ne $script:CtTree) 'C03 未產生容器'
+        $c = Read-Container $script:CtTree
+        Assert ($c.ContentType -eq 1) ('資料夾容器的 contentType 不是 0x01：0x{0:X2}' -f $c.ContentType)
+        $s = Read-Container $script:CtSingle
+        Assert ($s.ContentType -eq 1) ('單檔容器的 contentType 不是 0x01：0x{0:X2}' -f $s.ContentType)
+        Assert ($c.EpkLen -ge 80 -and $c.EpkLen -le 120) ('位移 +1 後 ephPubKeyLen 讀出異常：{0}' -f $c.EpkLen)
+        Assert ($c.Epk[0] -eq 0x30) ('位移 +1 後 ephPubKey 非 DER SEQUENCE 開頭：0x{0:X2}' -f $c.Epk[0])
+        return ('資料夾與單檔容器 byte[5] 皆為 0x01；ephPubKeyLen@6 讀出 {0}、ephPubKey@8 為 0x30' -f $c.EpkLen)
     }
 
     Invoke-Case 'C05' 'base64 文字編碼：每 76 字元換行、字元集合法' {
@@ -1057,7 +1073,7 @@ else {
         $outLen = (Get-Item -LiteralPath $out).Length
         $limit = [Math]::Max(8192, $inLen * 0.02)
         Assert ($outLen -lt $limit) ('輸出 {0}B 未顯著小於輸入 {1}B（門檻 {2}B）' -f $outLen, $inLen, [int]$limit)
-        return ('輸入 {0}B → 輸出 {1}B（{2:P3}，含 base64 膨脹與 {3}B 標頭）' -f $inLen, $outLen, ($outLen / $inLen), (7 + 91 + 28))
+        return ('輸入 {0}B → 輸出 {1}B（{2:P3}，含 base64 膨脹與 {3}B 標頭）' -f $inLen, $outLen, ($outLen / $inLen), (8 + 91 + 28))
     }
 
     Write-Host ''
@@ -1122,6 +1138,48 @@ else {
         $dest = Join-Path $script:Work 'unpack\legacy_ctxt'
         Assert ((Get-TreeMap $dest).Count -eq 0) '舊格式被拒卻仍寫出了檔案'
         return ("舊 CTXT v2 容器遭 magic 檢查拒絕、Destination 乾淨；$ev")
+    }
+
+    # contentType 已綁進 HKDF info，因此翻掉它必然表現為 GCM 認證失敗（＝被竄改），
+    # 而不是「不支援的內容型別」。後者只能出現在「tag 驗過但型別未知」的合法容器上。
+    function Test-ContentTypeFlip {
+        param([byte]$NewType, [string]$Tag)
+        $c = Read-Container $script:CtTree
+        $b = [byte[]]$c.Bytes.Clone()
+        $b[5] = $NewType
+        $t = Write-Container -Bytes $b -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) "ctype_$Tag.txt")
+        $r = Invoke-UnpackOnly -Txt $t -KeyFile $script:KeyA.KeyPath -DestName "ctype_$Tag"
+        $ev = Expect-Failure $r 'tag' ('contentType 翻成 0x{0:X2}' -f $NewType)
+        Assert (-not ($r.All -match '型別|content.?type|較新版本|不支援')) `
+        ('contentType 被竄改卻報成「型別不支援」：代表該欄位沒進 HKDF info，或合法性檢查被放在解析階段 => ' + (Squash $r.All 200))
+        $dest = Join-Path $script:Work "unpack\ctype_$Tag"
+        Assert ((Get-TreeMap $dest).Count -eq 0) 'contentType 被竄改卻仍寫出了檔案'
+        return ('0x01→0x{0:X2} 報竄改而非型別問題；{1}' -f $NewType, $ev)
+    }
+
+    Invoke-Case 'C52' 'contentType 竄改 0x01→0x02 → 須報「被竄改」（證明已綁進 HKDF info）' {
+        Test-ContentTypeFlip -NewType 2 -Tag '02'
+    }
+
+    Invoke-Case 'C53' 'contentType 竄改 0x01→0xFF → 須報「被竄改」而非型別不支援' {
+        Test-ContentTypeFlip -NewType 255 -Tag 'ff'
+    }
+
+    Invoke-Case 'C54' '合法的 contentType 0x03 容器 → 須報「由較新版本產生」' {
+        if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 還原 KDF 參數才能偽造密碼學上合法的容器' }
+        # 以 contentType = 0x03 完整走一次派生與加密：tag 必然驗得過，
+        # 此時型別仍未知，正確的結論是「本程式版本落後」，不是「資料被竄改」。
+        $t = New-ForgedRune -ZipBytes (New-ZipWithEntry -EntryName 'future.txt' -Content 'FROM-THE-FUTURE') `
+            -ContentType 3 -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'ctype03.txt')
+        $r = Invoke-UnpackOnly -Txt $t -KeyFile $script:KeyA.KeyPath -DestName 'ctype03'
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '未知的內容型別 0x03 竟然解包成功'
+        Assert ($r.All -match '型別|content.?type') ('訊息未指明是內容型別的問題：' + (Squash $r.All 200))
+        Assert ($r.All -match '較新版本|新版|請更新|update|newer') ('訊息未指引使用者更新工具：' + (Squash $r.All 200))
+        Assert (-not ($r.All -match '竄改|tamper|認證標籤')) ('合法容器的未知型別被誤報成竄改：' + (Squash $r.All 200))
+        $dest = Join-Path $script:Work 'unpack\ctype03'
+        Assert ((Get-TreeMap $dest).Count -eq 0) '未知型別被拒卻仍寫出了檔案'
+        return ('0x03 遭拒且訊息指向版本落後：' + (Squash $r.All 90))
     }
 
     Invoke-Case 'C15' '錯誤私鑰（另一組 P-256 blob）→ 報解鑰失敗' {
@@ -1386,6 +1444,7 @@ else {
         $hdr = [System.Collections.Generic.List[byte]]::new()
         $hdr.AddRange([System.Text.Encoding]::ASCII.GetBytes('RUNE'))
         $hdr.Add(2)
+        $hdr.Add(1)     # contentType 0x01 = 檔案樹
         $hdr.Add([byte]($epk.Length -band 0xFF)); $hdr.Add([byte](($epk.Length -shr 8) -band 0xFF))
         $hdr.AddRange($epk)
 
