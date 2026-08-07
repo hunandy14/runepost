@@ -1588,6 +1588,60 @@ function Invoke-VerifyTrack {
         return ('A={0} → B={1}，指紋確實改變，且 A 的私鑰解不開' -f $fpA, $fpB)
     }
 
+    # DESIGN.md §1.7.3 定義了三種公鑰錯誤路徑：找不到（C23）、曲線不符（C45）、
+    # 檔案存在但非合法 PEM（C60，本案）。三案合起來才覆蓋 Get-RunePublicKey 的
+    # 全部失敗分支。C61 / C62 補上 -PublicKey 走「檔案路徑」與「PEM 字串」兩種
+    # 解析分支各自的找不到／格式錯誤情境。三案的錯誤訊息一律只比對 $r.StdErr
+    # （見 Expect-Failure 的 -ErrOnly 說明），不受 seal 端指紋橫幅影響。
+
+    Invoke-TCase 'C60' '~\.rune\public.pem 存在但非合法 PEM → 報公鑰格式無效' {
+        $sb = New-HomeSandbox -Name 'badpem'
+        [void](New-TextFile $sb.PubPath "這不是 PEM，只是隨便打的文字`n-----BEGIN GARBAGE-----`n")
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'badpem.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '非合法 PEM 的 public.pem 竟然被接受並完成打包'
+        Assert (-not [System.IO.File]::Exists($out)) '公鑰格式無效卻仍產生了輸出檔'
+        Assert ($r.StdErr -match '公鑰 PEM 格式無效，無法載入') `
+        ('訊息未明講「公鑰 PEM 格式無效，無法載入」：' + (Squash $r.StdErr 200))
+        return (Squash $r.StdErr 130)
+    }
+
+    Invoke-TCase 'C61' '-PublicKey 指到不存在的路徑 → 報找不到，且措辭不繞（不是要求複製到使用者自己指定的路徑）' {
+        $badPath = Join-Path $script:Work 'no_such_dir\alice.pem'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'nopath.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $sb = New-HomeSandbox -Name 'pkbadpath'   # 沙箱刻意沒有 public.pem，逼真正生效的是 -PublicKey 那個分支
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out, '-PublicKey', $badPath) -EnvVars $sb.Env
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '-PublicKey 指到不存在的路徑竟然打包成功'
+        Assert (-not [System.IO.File]::Exists($out)) '公鑰路徑不存在卻仍產生了輸出檔'
+        Assert ($r.StdErr -match [regex]::Escape($badPath)) ('訊息未回報實際指定的路徑：' + (Squash $r.StdErr 200))
+        Assert ($r.StdErr -match '-PublicKey 指定的路徑') ('訊息未標明這是 -PublicKey 指定的路徑（而非預設路徑）：' + (Squash $r.StdErr 200))
+        # B1 修法的重點：不可再要求使用者「把 public.pem 複製到 <他自己指定的那個路徑>」
+        Assert (-not ($r.StdErr -match '複製到本機')) `
+        ('措辭仍是預設路徑那句「複製到本機 <path>」，對使用者自己指定的路徑語意繞：' + (Squash $r.StdErr 200))
+        return (Squash $r.StdErr 150)
+    }
+
+    Invoke-TCase 'C62' '-PublicKey 收到格式錯誤的 PEM 字串 → 報公鑰格式無效' {
+        $badPem = "-----BEGIN PUBLIC KEY-----`n這不是合法的 base64 內容`n-----END PUBLIC KEY-----"
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'badpemstring.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $sb = New-HomeSandbox -Name 'pkbadstring'
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out, '-PublicKey', $badPem) -EnvVars $sb.Env
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '格式錯誤的 PEM 字串竟然被接受並完成打包'
+        Assert (-not [System.IO.File]::Exists($out)) '公鑰格式無效卻仍產生了輸出檔'
+        Assert ($r.StdErr -match '公鑰 PEM 格式無效，無法載入') `
+        ('訊息未明講「公鑰 PEM 格式無效，無法載入」：' + (Squash $r.StdErr 200))
+        return (Squash $r.StdErr 130)
+    }
+
     Write-Host ''
     Write-Host '-- 隱藏案例（由規格不變量推導）--' -ForegroundColor Cyan
 
