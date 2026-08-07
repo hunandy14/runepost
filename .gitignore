@@ -2,3 +2,6 @@
 tests/_work/
 tests/verify-report.txt
 tests/verify-log.txt
+
+# 開發過程的暫存測試資料（本 repo 約定放這裡，不進版控）
+/scratchpad/
