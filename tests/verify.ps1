@@ -217,10 +217,26 @@ $script:ErrPatterns = @{
 }
 
 function Expect-Failure {
-    param($Res, [string]$Category, [string]$What)
+    <#
+        -ErrOnly：只比對 $Res.StdErr，不含 $Res.StdOut。
+
+        為什麼需要：rune-seal.ps1 只要成功載入公鑰，就會在「打包中」之前無條件印出
+        「收件人公鑰指紋：RUNE-KEY …（請與解密端 …指紋逐字比對；不符代表公鑰可能已
+        被掉包）」這段橫幅。這段橫幅本身就含 RUNE（→ format 類的 'RUNE'）、KEY（→
+        key 類的 'key'，-match 預設不分大小寫）、公鑰（→ nopub 類的 '公鑰'），所以只
+        要拿 $Res.All（stdout+stderr）比對 format / key / nopub 這三類，任何 seal 端
+        失敗案例都會無條件命中——不管真正的錯誤訊息有沒有指明環節。
+        真正的錯誤訊息一律經頂層 catch 用 [Console]::Error.WriteLine 印到 stderr（見
+        flow/seal-main.ps1 / flow/open-main.ps1 的進入點），所以只比對 StdErr 才是
+        比對「錯誤訊息本身」，而不是被成功路徑的進度輸出污染。
+        seal 端斷言 format / key / nopub 這三類時必須加 -ErrOnly；其餘類別（exists /
+        nomatch / input / param / tag / unsafe / curve / …）不受銀幕橫幅影響，可維持
+        比對 $Res.All 不變。
+    #>
+    param($Res, [string]$Category, [string]$What, [switch]$ErrOnly)
     Assert (-not $Res.TimedOut) "$What：子行程逾時（可能卡在互動提示）"
     Assert ($Res.Failed) ("$What：應該失敗卻成功了 (exit={0}, stderr 空)" -f $Res.ExitCode)
-    $msg = $Res.All
+    $msg = if ($ErrOnly) { $Res.StdErr } else { $Res.All }
     $pat = $script:ErrPatterns[$Category]
     Assert ($msg -match $pat) ("$What：有失敗但訊息未指明環節[$Category] => " + (Squash $msg 200))
     return ("exit={0}; msg={1}" -f $Res.ExitCode, (Squash $msg 90))
@@ -1311,13 +1327,17 @@ function Invoke-VerifyTrack {
         Assert (-not $r.TimedOut) '子行程逾時'
         Assert ($r.Failed) '家目錄沒有 public.pem 卻仍打包成功'
         Assert (-not [System.IO.File]::Exists($out)) '找不到公鑰卻仍產生了輸出檔'
-        Assert ($r.All -match $script:ErrPatterns['nopub']) ('訊息未指明公鑰環節：' + (Squash $r.All 200))
-        Assert ($r.All -match '找不到|不存在|not found') ('訊息未說明公鑰檔不存在：' + (Squash $r.All 200))
+        # 只比對 StdErr：seal 端一旦成功載入公鑰就會印出含「公鑰」「RUNE」「key」字樣的
+        # 指紋橫幅到 stdout，若拿 $r.All 比對 nopub/format/key 這幾類會被該橫幅污染而
+        # 無條件命中（本案是在載入公鑰失敗、橫幅根本沒印出的情況下觸發，但仍統一比對
+        # StdErr，不依賴「這次剛好沒印」這個事實）。
+        Assert ($r.StdErr -match $script:ErrPatterns['nopub']) ('訊息未指明公鑰環節：' + (Squash $r.StdErr 200))
+        Assert ($r.StdErr -match '找不到|不存在|not found') ('訊息未說明公鑰檔不存在：' + (Squash $r.StdErr 200))
         # 訊息必須指引使用者「怎麼取得公鑰」，而不是只說找不到
-        Assert ($r.All -match 'GenerateKeys') ('訊息未指引到解密端執行 -GenerateKeys：' + (Squash $r.All 200))
-        Assert ($r.All -match 'public\.pem') ('訊息未提到 public.pem：' + (Squash $r.All 200))
-        Assert ($r.All -match '-PublicKey') ('訊息未提到可用 -PublicKey 指定路徑或 PEM 字串：' + (Squash $r.All 200))
-        return (Squash $r.All 130)
+        Assert ($r.StdErr -match 'GenerateKeys') ('訊息未指引到解密端執行 -GenerateKeys：' + (Squash $r.StdErr 200))
+        Assert ($r.StdErr -match 'public\.pem') ('訊息未提到 public.pem：' + (Squash $r.StdErr 200))
+        Assert ($r.StdErr -match '-PublicKey') ('訊息未提到可用 -PublicKey 指定路徑或 PEM 字串：' + (Squash $r.StdErr 200))
+        return (Squash $r.StdErr 130)
     }
 
     Invoke-TCase 'C24' '輸入路徑不存在 → 報錯' {
