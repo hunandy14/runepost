@@ -1,23 +1,25 @@
-﻿#Requires -Version 7.2
+#Requires -Version 7.2
 <#
 .SYNOPSIS
-    密文傳輸 transfer.ps1 獨立驗收腳本（規格 v2 / 容器 version 0x02 / ECDH P-256 + HKDF-SHA256 + AES-256-GCM）
+    runepost 獨立驗收腳本（規格 v2 / 容器 version 0x02 / ECDH P-256 + HKDF-SHA256 + AES-256-GCM）
 
 .DESCRIPTION
-    本腳本只依據凍結規格撰寫，未讀取任何受測實作。
-    自行以受測物的 -GenerateKeys 在沙箱家目錄產生測試金鑰（DPAPI blob），
-    取其印出的公鑰 PEM 注入受測腳本的「副本」（絕不修改原檔），再全自動跑完所有案例。
+    本腳本只依據凍結規格撰寫，未讀取任何受測實作原始碼。
+    雙軌驗證：ALL 軌對 dist\rune-all.ps1（合體版，暫留作對照組）跑一次全套案例，
+    SPLIT 軌對 dist\rune-seal.ps1 + dist\rune-open.ps1（真正的兩個產物）再跑一次。
+    兩軌案例編號以 ':ALL' / ':SPLIT' 區分，任一軌任一案例 FAIL 則整體視為失敗。
+    若 SPLIT 紅而 ALL 綠，問題必在 build.ps1 manifest 收錄，而非程式邏輯本身。
 
-.PARAMETER TransferScript
-    受測 transfer.ps1 的路徑。
+.PARAMETER RepoRoot
+    repo 根目錄（內含 dist\rune-all.ps1 / dist\rune-seal.ps1 / dist\rune-open.ps1）。
 
 .EXAMPLE
-    pwsh -File .\verify.ps1 -TransferScript Z:\path\to\transfer.ps1
+    pwsh -File .\verify.ps1 -RepoRoot Z:\path\to\repo
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [string]$TransferScript,
+    [Parameter(Mandatory = $true)]
+    [string]$RepoRoot,
 
     # 工作目錄（預設 <本腳本目錄>\_work）
     [string]$WorkRoot,
@@ -46,6 +48,11 @@ $script:Results = [System.Collections.Generic.List[object]]::new()
 $script:LogLines = [System.Collections.Generic.List[string]]::new()
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:Utf8Bom = [System.Text.UTF8Encoding]::new($true)
+
+$script:RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+$script:AllScript = Join-Path $script:RepoRoot 'dist\rune-all.ps1'
+$script:SealScript = Join-Path $script:RepoRoot 'dist\rune-seal.ps1'
+$script:OpenScript = Join-Path $script:RepoRoot 'dist\rune-open.ps1'
 
 function Write-Log {
     param([string]$Text)
@@ -102,7 +109,7 @@ function Invoke-Case {
     Write-Log ("{0} {1} [{2}] {3}" -f $Id, $Name, $status, (Squash $evidence 400))
 
     $color = switch ($status) { 'PASS' { 'Green' } 'FAIL' { 'Red' } 'SKIP' { 'DarkYellow' } default { 'Cyan' } }
-    Write-Host ('  {0,-5} {1,-5} {2}' -f $Id, $status, (Squash $Name 46)) -ForegroundColor $color
+    Write-Host ('  {0,-14} {1,-5} {2}' -f $Id, $status, (Squash $Name 46)) -ForegroundColor $color
 }
 
 # ==============================================================================
@@ -204,7 +211,7 @@ $script:ErrPatterns = @{
     exists  = '已存在|存在|exists|Force|覆蓋|overwrite'
     nomatch = '找不到|沒有|未符合|不符合|沒有符合|no file|match|符合|空'
     input   = '找不到|不存在|not found|無效|invalid|路徑|path'
-    param   = 'Parameter set|參數|ParameterBinding|不能同時|互斥|cannot be resolved|Missing an argument|遺失|必要|Mandatory|ParameterArgumentValidation'
+    param   = 'Parameter set|參數|ParameterBinding|不能同時|互斥|cannot be resolved|Missing an argument|遺失|必要|Mandatory|ParameterArgumentValidation|cannot be found'
     # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞
     unsafe  = '不安全|逸出|逃逸|穿越|越界|非法路徑|不合法的路徑|路徑不安全|traversal|unsafe|zip.?slip'
     # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息
@@ -652,149 +659,8 @@ function New-TestKeyPair {
     }
 }
 
-# ==============================================================================
-# 8. 前置作業
-# ==============================================================================
-
-Write-Host ''
-Write-Host '========== transfer.ps1 獨立驗收（規格 v2 / container 0x02）==========' -ForegroundColor Cyan
-
-if ($Clean -and (Test-Path -LiteralPath $script:Work)) {
-    Remove-Item -LiteralPath $script:Work -Recurse -Force -ErrorAction SilentlyContinue
-}
-[void](New-Dir $script:Work)
-$script:WrapperPath = Join-Path $script:Work 'wrapper.ps1'
-[System.IO.File]::WriteAllText($script:WrapperPath, $script:WrapperSource, $script:Utf8Bom)
-
-$script:Sut = $null
-$script:SutKeyed = $null
-$script:KeyA = $null
-$script:KeyB = $null
-$script:PubPemA = $null
-$script:PubSpkiA = $null
-$script:EcdhA = $null
-$script:KdfInfo = $null
-
-Write-Host ''
-Write-Host '-- 前置 --' -ForegroundColor Cyan
-
-Invoke-Case 'P1' '受測腳本存在且語法可解析' {
-    Assert ([System.IO.File]::Exists($TransferScript)) "找不到受測腳本：$TransferScript"
-    $script:Sut = [System.IO.Path]::GetFullPath($TransferScript)
-    $script:OrigHash = Get-Sha $script:Sut
-    $text = [System.IO.File]::ReadAllText($script:Sut)
-    $f = Find-PublicKeyAssignment -Text $text
-    Assert ($f.Errors.Count -eq 0) ('解析錯誤 {0} 個：{1}' -f $f.Errors.Count, (Squash ($f.Errors[0].Message) 120))
-    return ('{0}；{1} 位元組；語法 OK' -f (Split-Path -Leaf $script:Sut), (Get-Item -LiteralPath $script:Sut).Length)
-}
-
-Invoke-Case 'P2' '產物中不存在任何 $PublicKeyPem 賦值（公鑰已徹底外部化）' {
-    Assert ($null -ne $script:Sut) '前置 P1 未通過'
-    $text = [System.IO.File]::ReadAllText($script:Sut)
-    $f = Find-PublicKeyAssignment -Text $text
-    $where = if ($null -ne $f.Hit) { $f.Hit.Extent.StartLineNumber } else { 0 }
-    Assert ($null -eq $f.Hit) ('產物仍保留 $PublicKeyPem 賦值（行 {0}）：內嵌公鑰未徹底移除' -f $where)
-    Assert (-not ($text -match 'PublicKeyPem')) '產物仍出現 PublicKeyPem 字樣，內嵌公鑰的路徑未清乾淨'
-    return ('全檔無 $PublicKeyPem 賦值、無 PublicKeyPem 字樣；公鑰改為執行期讀取')
-}
-
-Invoke-Case 'P3' '家目錄沙箱可用（不污染真實 ~\.rune）' {
-    $sb = New-HomeSandbox -Name 'probe'
-    $probe = Join-Path $script:Work 'homeprobe.ps1'
-    [System.IO.File]::WriteAllText($probe, '"H=$HOME"; "T=" + (Resolve-Path ~).ProviderPath; "U=$env:USERPROFILE"', $script:Utf8Bom)
-    $r = Invoke-Transfer -ScriptPath $probe -EnvVars $sb.Env -WorkDir $sb.Path
-    $ok = ($r.StdOut -split "`r?`n" | Where-Object { $_ -match '^[HTU]=' } | ForEach-Object { $_.Substring(2) } | Where-Object { $_ -notlike "$($sb.Path)*" })
-    Assert (-not $ok) ('沙箱未完全生效：' + (Squash $r.StdOut 120))
-    return ('~ / $HOME / $env:USERPROFILE 皆指向沙箱；真實私鑰存在={0}' -f $script:RealKeyExisted)
-}
-
-Invoke-Case 'P4' '受測物 -GenerateKeys 產生測試金鑰 A' {
-    Assert ($null -ne $script:Sut) '前置 P1 未通過'
-    $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:Sut
-    Assert ($script:KeyA.HasKey) ('未在 ~\.rune\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
-    Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未印出 PUBLIC KEY PEM 區塊；輸出=' + (Squash $script:KeyA.Result.All 160))
-    $script:PubPemA = $script:KeyA.PublicPem
-    $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
-    $ec.ImportFromPem($script:PubPemA)
-    $script:PubSpkiA = $ec.ExportSubjectPublicKeyInfo()
-    $curve = $ec.ExportParameters($false).Curve
-    $isP256 = ($curve.Oid.Value -eq '1.2.840.10045.3.1.7') -or ($curve.Oid.FriendlyName -match 'nistP256|P-256|prime256')
-    Assert $isP256 ('公鑰不是 P-256：' + $curve.Oid.Value + '/' + $curve.Oid.FriendlyName)
-    $note = if ($script:KeyA.Escaped) { '（注意：寫入未受沙箱控制的位置，已還原）' } else { '' }
-    return ('私鑰 {0} 位元組；公鑰 P-256 SPKI {1}B{2}' -f (Get-Item -LiteralPath $script:KeyA.KeyPath).Length, $script:PubSpkiA.Length, $note)
-}
-
-Invoke-Case 'P5' '產生第二組測試金鑰 B（供錯誤私鑰案例）' {
-    Assert ($null -ne $script:Sut) '前置 P1 未通過'
-    $script:KeyB = New-TestKeyPair -Name 'B' -ScriptPath $script:Sut
-    Assert ($script:KeyB.HasKey) '第二組私鑰未產生'
-    Assert ((Get-Sha $script:KeyB.KeyPath) -ne (Get-Sha $script:KeyA.KeyPath)) '兩次 -GenerateKeys 產生相同的私鑰 blob（金鑰未隨機）'
-    return ('金鑰 B 就緒；與 A 的 blob 不同')
-}
-
-Invoke-Case 'P6' '沙箱家目錄已備妥 public.pem（不再製作任何腳本副本）' {
-    Assert ($null -ne $script:PubPemA) '前置 P4 未通過'
-    $before = Get-Sha $script:Sut
-    # 公鑰改為執行期讀檔後，加密端不需要客製化的腳本，一律直接對原檔執行。
-    # 變數名沿用 SutKeyed 以縮小本次 diff；拆成 seal / open 兩產物時再改其指向。
-    $script:SutKeyed = $script:Sut
-    $pub = $script:KeyA.Sandbox.PubPath
-    Assert ([System.IO.File]::Exists($pub)) "-GenerateKeys 未在沙箱家目錄寫出 public.pem：$pub"
-    $onDisk = Get-PemBlock -Text ([System.IO.File]::ReadAllText($pub))
-    Assert ($null -ne $onDisk) 'public.pem 內容不是合法的 PUBLIC KEY PEM 區塊'
-    $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
-    $ec.ImportFromPem($onDisk)
-    Assert ([Convert]::ToHexString($ec.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
-        'public.pem 內的公鑰與 -GenerateKeys 印出的 PEM 不是同一把'
-    Assert ((Get-Sha $script:Sut) -eq $before) '原始受測腳本被修改了'
-    return ('沙箱 ~\.rune\public.pem 就緒且與印出的公鑰一致；全程未製作任何腳本副本')
-}
-
-# 前置未過就沒有意義往下跑
-$preFail = @($script:Results | Where-Object { $_.No -like 'P*' -and $_.Result -eq 'FAIL' })
-$script:CanRun = ($preFail.Count -eq 0)
-
-# ------- 共用測試素材 -------
-function Initialize-Fixtures {
-    $f = Join-Path $script:Work 'fixtures'
-    if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Recurse -Force }
-    [void](New-Dir $f)
-
-    # 單檔（二進位）
-    [void](New-BinFile (Join-Path $f 'single\payload.bin') 262144 20260807)
-    # wildcard 目錄：3 個 .txt（含中文檔名）+ 1 個非匹配 + 子目錄內的 .txt（不得被遞迴收入）
-    [void](New-TextFile (Join-Path $f 'wild\alpha.txt') 'alpha')
-    [void](New-TextFile (Join-Path $f 'wild\中文檔名測試.txt') "中文內容 `u{4F60}`u{597D}")
-    [void](New-TextFile (Join-Path $f 'wild\第二個 檔案.txt') 'second file with space')
-    [void](New-TextFile (Join-Path $f 'wild\skip-me.md') 'should not be packed')
-    [void](New-TextFile (Join-Path $f 'wild\sub\nested.txt') 'must NOT be packed (no recursion)')
-    # 資料夾：中文子目錄 + 深層 + 同名不同層 + 0 byte + 特殊字元
-    [void](New-TextFile (Join-Path $f 'tree\readme.txt') 'root readme')
-    [void](New-TextFile (Join-Path $f 'tree\中文目錄\說明.txt') '中文子目錄內容')
-    [void](New-TextFile (Join-Path $f 'tree\中文目錄\更深\第三層\deep.txt') 'deep file')
-    [void](New-TextFile (Join-Path $f 'tree\a\same.txt') 'A version')
-    [void](New-TextFile (Join-Path $f 'tree\b\same.txt') 'B version')
-    [void](New-BinFile (Join-Path $f 'tree\empty.bin') 0)
-    [void](New-TextFile (Join-Path $f "tree\odd names\a b&c#d(e)[f]'g+h^i.txt") 'odd name content')
-    [void](New-BinFile (Join-Path $f 'tree\bin\random.dat') 65536 99)
-    # 高冗餘壓縮素材
-    $rep = ([string]('CTXT-COMPRESSION-TEST-' * 40) + "`n")
-    $sb = [System.Text.StringBuilder]::new()
-    for ($i = 0; $i -lt 2000; $i++) { [void]$sb.Append($rep) }
-    [void](New-TextFile (Join-Path $f 'redundant\big.txt') $sb.ToString())
-    # 預設檔名推導素材
-    [void](New-TextFile (Join-Path $f 'naming\report.docx') 'pretend docx')
-    [void](New-TextFile (Join-Path $f 'naming\project\x.txt') 'proj file')
-    [void](New-TextFile (Join-Path $f 'naming\wcdir\one.txt') 'one')
-    [void](New-TextFile (Join-Path $f 'naming\wcdir\two.txt') 'two')
-    [void](New-Dir (Join-Path $f 'emptywild'))
-    return $f
-}
-
-$script:Fx = $null
-if ($script:CanRun) { $script:Fx = Initialize-Fixtures }
-
-# 打包 + 解包的共用流程
+# 打包 + 解包的共用流程：Pack 一律用當前軌的 $script:SutSeal，Unpack 一律用 $script:SutOpen。
+# 兩者是 $script: 範圍變數，由 Invoke-VerifyTrack 在每一軌開始時設定，函式本身只定義一次。
 function Invoke-Roundtrip {
     param([string]$Name, [string]$Source, [string]$OutTxt, [string[]]$ExtraPack = @())
     $out = if ($OutTxt) { $OutTxt } else { Join-Path $script:Work "out\$Name.txt" }
@@ -803,11 +669,11 @@ function Invoke-Roundtrip {
     $dest = New-Dir (Join-Path $script:Work "unpack\$Name")
     Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-    $p = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments (@('-Pack', $Source, '-OutFile', $out) + $ExtraPack) -EnvVars $script:KeyA.Sandbox.Env
+    $p = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments (@('-Pack', $Source, '-OutFile', $out) + $ExtraPack) -EnvVars $script:KeyA.Sandbox.Env
     [void](Expect-Success $p "Pack($Name)")
     Assert ([System.IO.File]::Exists($out)) "Pack($Name) 未產生輸出檔 $out"
 
-    $u = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+    $u = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
     [void](Expect-Success $u "Unpack($Name)")
     return [pscustomobject]@{ Out = $out; Dest = $dest; Pack = $p; Unpack = $u }
 }
@@ -825,7 +691,7 @@ function Invoke-UnpackOnly {
     $a = @('-Unpack', $Txt, '-Destination', $dest)
     if ($KeyFile) { $a += @('-KeyFile', $KeyFile) }
     $a += $Extra
-    return Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments $a -EnvVars $script:KeyA.Sandbox.Env
+    return Invoke-Transfer -ScriptPath $script:SutOpen -Arguments $a -EnvVars $script:KeyA.Sandbox.Env
 }
 
 # 建一個只含指定 entry 名稱的 ZIP（用來構造惡意封存）
@@ -892,18 +758,190 @@ function New-ForgedRune {
 }
 
 # ==============================================================================
-# 9. 案例
+# 8. wrapper 落地（兩軌共用，與受測腳本無關）
 # ==============================================================================
 
-if (-not $script:CanRun) {
-    Write-Host ''
-    Write-Host '前置作業失敗，後續案例全部跳過。' -ForegroundColor Red
-}
-else {
-    Write-Host ''
-    Write-Host '-- Roundtrip --' -ForegroundColor Cyan
+Write-Host ''
+Write-Host '========== runepost 獨立驗收（規格 v2 / container 0x02 / 雙軌：ALL + SPLIT）==========' -ForegroundColor Cyan
 
-    Invoke-Case 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）' {
+if ($Clean -and (Test-Path -LiteralPath $script:Work)) {
+    Remove-Item -LiteralPath $script:Work -Recurse -Force -ErrorAction SilentlyContinue
+}
+[void](New-Dir $script:Work)
+$script:WrapperPath = Join-Path $script:Work 'wrapper.ps1'
+[System.IO.File]::WriteAllText($script:WrapperPath, $script:WrapperSource, $script:Utf8Bom)
+
+# ==============================================================================
+# 9. 單軌驗證：對一組 (SealScript, OpenScript) 跑完整套案例
+#    ALL 軌：SealScript = OpenScript = dist\rune-all.ps1（合體版，暫留作對照組）
+#    SPLIT 軌：SealScript = dist\rune-seal.ps1，OpenScript = dist\rune-open.ps1
+#    案例編號一律加上 ":<TrackLabel>" 後綴，兩軌互不干擾、互不覆蓋對方的報表列。
+# ==============================================================================
+
+function Invoke-VerifyTrack {
+    param(
+        [string]$TrackLabel,
+        [string]$SealScript,
+        [string]$OpenScript
+    )
+
+    $script:Work = Join-Path $WorkRoot $TrackLabel
+    [void](New-Dir $script:Work)
+
+    function Invoke-TCase {
+        param([string]$Id, [string]$Name, [scriptblock]$Body)
+        Invoke-Case -Id "$Id`:$TrackLabel" -Name $Name -Body $Body
+    }
+
+    $script:SutSeal = $null
+    $script:SutOpen = $null
+    $script:OrigHashSeal = $null
+    $script:OrigHashOpen = $null
+    $script:KeyA = $null
+    $script:KeyB = $null
+    $script:PubPemA = $null
+    $script:PubSpkiA = $null
+    $script:EcdhA = $null
+    $script:KdfInfo = $null
+
+    Write-Host ''
+    Write-Host "-- 前置（$TrackLabel）--" -ForegroundColor Cyan
+
+    Invoke-TCase 'P1a' '受測腳本存在且語法可解析（seal）' {
+        Assert ([System.IO.File]::Exists($SealScript)) "找不到受測腳本（seal）：$SealScript"
+        $script:SutSeal = [System.IO.Path]::GetFullPath($SealScript)
+        $script:OrigHashSeal = Get-Sha $script:SutSeal
+        $text = [System.IO.File]::ReadAllText($script:SutSeal)
+        $t = $null; $e = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e)
+        Assert ($e.Count -eq 0) ('解析錯誤 {0} 個：{1}' -f $e.Count, (Squash ($e[0].Message) 120))
+        return ('{0}；{1} 位元組；語法 OK' -f (Split-Path -Leaf $script:SutSeal), (Get-Item -LiteralPath $script:SutSeal).Length)
+    }
+
+    Invoke-TCase 'P1b' '受測腳本存在且語法可解析（open）' {
+        Assert ([System.IO.File]::Exists($OpenScript)) "找不到受測腳本（open）：$OpenScript"
+        $script:SutOpen = [System.IO.Path]::GetFullPath($OpenScript)
+        $script:OrigHashOpen = Get-Sha $script:SutOpen
+        $text = [System.IO.File]::ReadAllText($script:SutOpen)
+        $t = $null; $e = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e)
+        Assert ($e.Count -eq 0) ('解析錯誤 {0} 個：{1}' -f $e.Count, (Squash ($e[0].Message) 120))
+        return ('{0}；{1} 位元組；語法 OK' -f (Split-Path -Leaf $script:SutOpen), (Get-Item -LiteralPath $script:SutOpen).Length)
+    }
+
+    Invoke-TCase 'P2' '產物中不存在任何 $PublicKeyPem 賦值（公鑰已徹底外部化；seal + open 皆須檢查）' {
+        Assert ($null -ne $script:SutSeal -and $null -ne $script:SutOpen) '前置 P1a/P1b 未通過'
+        foreach ($pair in @(@{ N = 'seal'; P = $script:SutSeal }, @{ N = 'open'; P = $script:SutOpen })) {
+            $text = [System.IO.File]::ReadAllText($pair.P)
+            $f = Find-PublicKeyAssignment -Text $text
+            $where = if ($null -ne $f.Hit) { $f.Hit.Extent.StartLineNumber } else { 0 }
+            Assert ($null -eq $f.Hit) ('{0} 產物仍保留 $PublicKeyPem 賦值（行 {1}）：內嵌公鑰未徹底移除' -f $pair.N, $where)
+            Assert (-not ($text -match 'PublicKeyPem')) ('{0} 產物仍出現 PublicKeyPem 字樣，內嵌公鑰的路徑未清乾淨' -f $pair.N)
+        }
+        return ('seal + open 兩產物皆無 $PublicKeyPem 賦值、無 PublicKeyPem 字樣；公鑰改為執行期讀取')
+    }
+
+    Invoke-TCase 'P3' '家目錄沙箱可用（不污染真實 ~\.rune）' {
+        $sb = New-HomeSandbox -Name 'probe'
+        $probe = Join-Path $script:Work 'homeprobe.ps1'
+        [System.IO.File]::WriteAllText($probe, '"H=$HOME"; "T=" + (Resolve-Path ~).ProviderPath; "U=$env:USERPROFILE"', $script:Utf8Bom)
+        $r = Invoke-Transfer -ScriptPath $probe -EnvVars $sb.Env -WorkDir $sb.Path
+        $ok = ($r.StdOut -split "`r?`n" | Where-Object { $_ -match '^[HTU]=' } | ForEach-Object { $_.Substring(2) } | Where-Object { $_ -notlike "$($sb.Path)*" })
+        Assert (-not $ok) ('沙箱未完全生效：' + (Squash $r.StdOut 120))
+        return ('~ / $HOME / $env:USERPROFILE 皆指向沙箱；真實私鑰存在={0}' -f $script:RealKeyExisted)
+    }
+
+    Invoke-TCase 'P4' '受測物 -GenerateKeys 產生測試金鑰 A（open）' {
+        Assert ($null -ne $script:SutOpen) '前置 P1b 未通過'
+        $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:SutOpen
+        Assert ($script:KeyA.HasKey) ('未在 ~\.rune\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
+        Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未印出 PUBLIC KEY PEM 區塊；輸出=' + (Squash $script:KeyA.Result.All 160))
+        $script:PubPemA = $script:KeyA.PublicPem
+        $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $ec.ImportFromPem($script:PubPemA)
+        $script:PubSpkiA = $ec.ExportSubjectPublicKeyInfo()
+        $curve = $ec.ExportParameters($false).Curve
+        $isP256 = ($curve.Oid.Value -eq '1.2.840.10045.3.1.7') -or ($curve.Oid.FriendlyName -match 'nistP256|P-256|prime256')
+        Assert $isP256 ('公鑰不是 P-256：' + $curve.Oid.Value + '/' + $curve.Oid.FriendlyName)
+        $note = if ($script:KeyA.Escaped) { '（注意：寫入未受沙箱控制的位置，已還原）' } else { '' }
+        return ('私鑰 {0} 位元組；公鑰 P-256 SPKI {1}B{2}' -f (Get-Item -LiteralPath $script:KeyA.KeyPath).Length, $script:PubSpkiA.Length, $note)
+    }
+
+    Invoke-TCase 'P5' '產生第二組測試金鑰 B（供錯誤私鑰案例）' {
+        Assert ($null -ne $script:SutOpen) '前置 P1b 未通過'
+        $script:KeyB = New-TestKeyPair -Name 'B' -ScriptPath $script:SutOpen
+        Assert ($script:KeyB.HasKey) '第二組私鑰未產生'
+        Assert ((Get-Sha $script:KeyB.KeyPath) -ne (Get-Sha $script:KeyA.KeyPath)) '兩次 -GenerateKeys 產生相同的私鑰 blob（金鑰未隨機）'
+        return ('金鑰 B 就緒；與 A 的 blob 不同')
+    }
+
+    Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem（不再製作任何腳本副本）' {
+        Assert ($null -ne $script:PubPemA) '前置 P4 未通過'
+        $pub = $script:KeyA.Sandbox.PubPath
+        Assert ([System.IO.File]::Exists($pub)) "-GenerateKeys 未在沙箱家目錄寫出 public.pem：$pub"
+        $onDisk = Get-PemBlock -Text ([System.IO.File]::ReadAllText($pub))
+        Assert ($null -ne $onDisk) 'public.pem 內容不是合法的 PUBLIC KEY PEM 區塊'
+        $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $ec.ImportFromPem($onDisk)
+        Assert ([Convert]::ToHexString($ec.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
+            'public.pem 內的公鑰與 -GenerateKeys 印出的 PEM 不是同一把'
+        return ('沙箱 ~\.rune\public.pem 就緒且與印出的公鑰一致；seal / open 皆直接對原檔執行，全程未製作任何腳本副本')
+    }
+
+    # 前置未過就沒有意義往下跑（只看本軌新增的 P 系列結果，不受另一軌影響）
+    $preFailCount = @($script:Results | Where-Object { $_.No -like "P*:$TrackLabel" -and $_.Result -eq 'FAIL' }).Count
+    $trackCanRun = ($preFailCount -eq 0)
+
+    # ------- 共用測試素材 -------
+    function Initialize-Fixtures {
+        $f = Join-Path $script:Work 'fixtures'
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Recurse -Force }
+        [void](New-Dir $f)
+
+        # 單檔（二進位）
+        [void](New-BinFile (Join-Path $f 'single\payload.bin') 262144 20260807)
+        # wildcard 目錄：3 個 .txt（含中文檔名）+ 1 個非匹配 + 子目錄內的 .txt（不得被遞迴收入）
+        [void](New-TextFile (Join-Path $f 'wild\alpha.txt') 'alpha')
+        [void](New-TextFile (Join-Path $f 'wild\中文檔名測試.txt') "中文內容 `u{4F60}`u{597D}")
+        [void](New-TextFile (Join-Path $f 'wild\第二個 檔案.txt') 'second file with space')
+        [void](New-TextFile (Join-Path $f 'wild\skip-me.md') 'should not be packed')
+        [void](New-TextFile (Join-Path $f 'wild\sub\nested.txt') 'must NOT be packed (no recursion)')
+        # 資料夾：中文子目錄 + 深層 + 同名不同層 + 0 byte + 特殊字元
+        [void](New-TextFile (Join-Path $f 'tree\readme.txt') 'root readme')
+        [void](New-TextFile (Join-Path $f 'tree\中文目錄\說明.txt') '中文子目錄內容')
+        [void](New-TextFile (Join-Path $f 'tree\中文目錄\更深\第三層\deep.txt') 'deep file')
+        [void](New-TextFile (Join-Path $f 'tree\a\same.txt') 'A version')
+        [void](New-TextFile (Join-Path $f 'tree\b\same.txt') 'B version')
+        [void](New-BinFile (Join-Path $f 'tree\empty.bin') 0)
+        [void](New-TextFile (Join-Path $f "tree\odd names\a b&c#d(e)[f]'g+h^i.txt") 'odd name content')
+        [void](New-BinFile (Join-Path $f 'tree\bin\random.dat') 65536 99)
+        # 高冗餘壓縮素材
+        $rep = ([string]('CTXT-COMPRESSION-TEST-' * 40) + "`n")
+        $sb = [System.Text.StringBuilder]::new()
+        for ($i = 0; $i -lt 2000; $i++) { [void]$sb.Append($rep) }
+        [void](New-TextFile (Join-Path $f 'redundant\big.txt') $sb.ToString())
+        # 預設檔名推導素材
+        [void](New-TextFile (Join-Path $f 'naming\report.docx') 'pretend docx')
+        [void](New-TextFile (Join-Path $f 'naming\project\x.txt') 'proj file')
+        [void](New-TextFile (Join-Path $f 'naming\wcdir\one.txt') 'one')
+        [void](New-TextFile (Join-Path $f 'naming\wcdir\two.txt') 'two')
+        [void](New-Dir (Join-Path $f 'emptywild'))
+        return $f
+    }
+
+    $script:Fx = $null
+    if ($trackCanRun) { $script:Fx = Initialize-Fixtures }
+
+    if (-not $trackCanRun) {
+        Write-Host ''
+        Write-Host "[$TrackLabel] 前置作業失敗，後續案例全部跳過。" -ForegroundColor Red
+        return
+    }
+
+    Write-Host ''
+    Write-Host "-- Roundtrip（$TrackLabel）--" -ForegroundColor Cyan
+
+    Invoke-TCase 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）' {
         $src = Join-Path $script:Fx 'single\payload.bin'
         $r = Invoke-Roundtrip -Name 'single' -Source $src
         $script:CtSingle = $r.Out
@@ -914,7 +952,7 @@ else {
         return ('1 檔位元完全一致；SHA={0}…；容器 {1}B' -f (Get-Sha $src).Substring(0, 12), (Get-Item -LiteralPath $r.Out).Length)
     }
 
-    Invoke-Case 'C02' 'wildcard（含中文檔名）roundtrip 且不遞迴' {
+    Invoke-TCase 'C02' 'wildcard（含中文檔名）roundtrip 且不遞迴' {
         $dir = Join-Path $script:Fx 'wild'
         $r = Invoke-Roundtrip -Name 'wild' -Source (Join-Path $dir '*.txt')
         $script:CtWild = $r.Out
@@ -928,7 +966,7 @@ else {
         return ('3 檔（含中文/空白檔名）一致；子目錄與非匹配副檔名皆未收入；{0}' -f $c.Convention)
     }
 
-    Invoke-Case 'C03' '資料夾遞迴 roundtrip（中文子目錄、深層、同名不同層）' {
+    Invoke-TCase 'C03' '資料夾遞迴 roundtrip（中文子目錄、深層、同名不同層）' {
         $dir = Join-Path $script:Fx 'tree'
         $r = Invoke-Roundtrip -Name 'tree' -Source $dir
         $script:CtTree = $r.Out
@@ -940,9 +978,9 @@ else {
     }
 
     Write-Host ''
-    Write-Host '-- 格式白盒 --' -ForegroundColor Cyan
+    Write-Host "-- 格式白盒（$TrackLabel）--" -ForegroundColor Cyan
 
-    Invoke-Case 'C04' '容器結構：magic/version=0x02/ephPubKeyLen/各段偏移自洽' {
+    Invoke-TCase 'C04' '容器結構：magic/version=0x02/ephPubKeyLen/各段偏移自洽' {
         Assert ($null -ne $script:CtTree) 'C03 未產生容器'
         $c = Read-Container $script:CtTree
         Assert ($c.Magic -eq 'RUNE') ("magic 不是 RUNE：'{0}'" -f $c.Magic)
@@ -958,7 +996,7 @@ else {
                 $c.EpkLen, (8 + $c.EpkLen), (8 + $c.EpkLen + 12), $c.Cipher.Length)
     }
 
-    Invoke-Case 'C51' 'contentType 欄位：byte[5] = 0x01（檔案樹），header 最小長度 8' {
+    Invoke-TCase 'C51' 'contentType 欄位：byte[5] = 0x01（檔案樹），header 最小長度 8' {
         Assert ($null -ne $script:CtTree) 'C03 未產生容器'
         $c = Read-Container $script:CtTree
         Assert ($c.ContentType -eq 1) ('資料夾容器的 contentType 不是 0x01：0x{0:X2}' -f $c.ContentType)
@@ -969,7 +1007,7 @@ else {
         return ('資料夾與單檔容器 byte[5] 皆為 0x01；ephPubKeyLen@6 讀出 {0}、ephPubKey@8 為 0x30' -f $c.EpkLen)
     }
 
-    Invoke-Case 'C05' 'base64 文字編碼：每 76 字元換行、字元集合法' {
+    Invoke-TCase 'C05' 'base64 文字編碼：每 76 字元換行、字元集合法' {
         $c = Read-Container $script:CtTree
         Assert ($c.Lines.Count -ge 2) '輸出行數過少，無法判斷換行'
         $bad = @($c.Lines[0..($c.Lines.Count - 2)] | Where-Object { $_.Length -ne 76 })
@@ -980,13 +1018,13 @@ else {
         return ('{0} 行，前 {1} 行皆 76 字元，末行 {2}；純 ASCII' -f $c.Lines.Count, ($c.Lines.Count - 1), $c.Lines[-1].Length)
     }
 
-    Invoke-Case 'C06' '一次性金鑰：同輸入 Pack 兩次，ephPub/nonce/密文皆不同' {
+    Invoke-TCase 'C06' '一次性金鑰：同輸入 Pack 兩次，ephPub/nonce/密文皆不同' {
         $src = Join-Path $script:Fx 'single\payload.bin'
         $o1 = Join-Path $script:Work 'out\once1.txt'
         $o2 = Join-Path $script:Work 'out\once2.txt'
         foreach ($o in @($o1, $o2)) { if ([System.IO.File]::Exists($o)) { [System.IO.File]::Delete($o) } }
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', $src, '-OutFile', $o1) -EnvVars $script:KeyA.Sandbox.Env) 'Pack#1')
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', $src, '-OutFile', $o2) -EnvVars $script:KeyA.Sandbox.Env) 'Pack#2')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $src, '-OutFile', $o1) -EnvVars $script:KeyA.Sandbox.Env) 'Pack#1')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $src, '-OutFile', $o2) -EnvVars $script:KeyA.Sandbox.Env) 'Pack#2')
         $a = Read-Container $o1; $b = Read-Container $o2
         $hex = { param($x) [Convert]::ToHexString([byte[]]$x) }
         Assert ((& $hex $a.Epk) -ne (& $hex $b.Epk)) 'ephemeral 公鑰重複（金鑰非一次性）'
@@ -996,7 +1034,7 @@ else {
         return ('epk/nonce/ct/tag 四者皆不同；nonce1={0} nonce2={1}' -f (& $hex $a.Nonce), (& $hex $b.Nonce))
     }
 
-    Invoke-Case 'C07' 'ephemeral 公鑰確為可匯入的 P-256 SubjectPublicKeyInfo' {
+    Invoke-TCase 'C07' 'ephemeral 公鑰確為可匯入的 P-256 SubjectPublicKeyInfo' {
         $c = Read-Container $script:CtTree
         $e = [System.Security.Cryptography.ECDiffieHellman]::Create()
         $read = 0
@@ -1010,7 +1048,7 @@ else {
         return ('P-256 SPKI 解析成功，consumed={0}B，且不等於收件人公鑰' -f $read)
     }
 
-    Invoke-Case 'C08' '獨立解密鏈：DPAPI→ECDH→HKDF-SHA256→AES-GCM→Brotli→Zip' {
+    Invoke-TCase 'C08' '獨立解密鏈：DPAPI→ECDH→HKDF-SHA256→AES-GCM→Brotli→Zip' {
         $ecdh = Import-PrivateKeyFromBlob -BlobPath $script:KeyA.KeyPath
         if ($null -eq $ecdh) { Info-Case '私鑰 blob 無法以 DPAPI(null entropy)+PKCS8/EC/PEM 還原，無法獨立重建金鑰（規格未定義 blob 內部格式）' }
         $script:EcdhA = $ecdh
@@ -1028,7 +1066,7 @@ else {
         return ('金鑰導出={0}, AAD={1}；密文 {2}B → Brotli 解出 zip {3}B / {4} 筆項目' -f $k.Label, $k.Aad, $c.Cipher.Length, $zip.Length, $entries.Count)
     }
 
-    Invoke-Case 'C09' 'ZIP 為純 store（NoCompression）且單檔也打包' {
+    Invoke-TCase 'C09' 'ZIP 為純 store（NoCompression）且單檔也打包' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 成功取得明文' }
         $e = Get-ZipCentralDirectory -Zip $script:ZipTree
         $bad = @($e | Where-Object { $_.Method -ne 0 })
@@ -1045,7 +1083,7 @@ else {
         return ('資料夾 {0} 筆全為 method=0；單檔輸入亦為 zip（{1} 筆：{2}）' -f $e.Count, $e1.Count, $e1[0].Name)
     }
 
-    Invoke-Case 'C10' 'ZIP 檔名 UTF-8（非 ASCII 項目須設 bit 11 且位元組為 UTF-8）' {
+    Invoke-TCase 'C10' 'ZIP 檔名 UTF-8（非 ASCII 項目須設 bit 11 且位元組為 UTF-8）' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 成功取得明文' }
         $e = Get-ZipCentralDirectory -Zip $script:ZipTree
         $nonAscii = @($e | Where-Object { -not $_.NameIsAscii })
@@ -1058,11 +1096,11 @@ else {
         return ('{0} 筆非 ASCII 項目全部 bit11=1 且為 UTF-8，例：{1}' -f $nonAscii.Count, $nonAscii[0].Name)
     }
 
-    Invoke-Case 'C11' '壓縮有效性：高冗餘輸入輸出遠小於原檔' {
+    Invoke-TCase 'C11' '壓縮有效性：高冗餘輸入輸出遠小於原檔' {
         $src = Join-Path $script:Fx 'redundant\big.txt'
         $out = Join-Path $script:Work 'out\redundant.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', $src, '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env -Timeout 300) 'Pack(redundant)')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $src, '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env -Timeout 300) 'Pack(redundant)')
         $inLen = (Get-Item -LiteralPath $src).Length
         $outLen = (Get-Item -LiteralPath $out).Length
         $limit = [Math]::Max(8192, $inLen * 0.02)
@@ -1071,9 +1109,9 @@ else {
     }
 
     Write-Host ''
-    Write-Host '-- 錯誤路徑 --' -ForegroundColor Cyan
+    Write-Host "-- 錯誤路徑（$TrackLabel）--" -ForegroundColor Cyan
 
-    Invoke-Case 'C12' '竄改 base64 一字元 → 報內容損壞（tag 驗證）' {
+    Invoke-TCase 'C12' '竄改 base64 一字元 → 報內容損壞（tag 驗證）' {
         $t = Copy-Container $script:CtTree 'tamper_b64.txt'
         $txt = [System.IO.File]::ReadAllText($t)
         $lines = @(($txt -split "`r?`n") | Where-Object { $_.Length -gt 0 })
@@ -1089,7 +1127,7 @@ else {
         return ("第 $li 行第 $ci 字元 '$old'→'$new'；$ev")
     }
 
-    Invoke-Case 'C13' '竄改 magic → 報格式不符' {
+    Invoke-TCase 'C13' '竄改 magic → 報格式不符' {
         $c = Read-Container $script:CtTree
         $b = [byte[]]$c.Bytes.Clone()
         $b[0] = [byte][char]'X'
@@ -1099,7 +1137,7 @@ else {
         return ("magic 'RUNE'→'XUNE'；$ev")
     }
 
-    Invoke-Case 'C14' '竄改 version(0x02→0x09) → 報版本不符' {
+    Invoke-TCase 'C14' '竄改 version(0x02→0x09) → 報版本不符' {
         $c = Read-Container $script:CtTree
         $b = [byte[]]$c.Bytes.Clone()
         $b[4] = 0x09
@@ -1109,7 +1147,7 @@ else {
         return ("version 0x02→0x09；$ev")
     }
 
-    Invoke-Case 'C50' '新舊格式互斥：舊 CTXT 容器須以 magic 不符被拒' {
+    Invoke-TCase 'C50' '新舊格式互斥：舊 CTXT 容器須以 magic 不符被拒' {
         # 舊工具的 CTXT v2 與本工具的 RUNE v2 沿用同一個 version 編號，兩者只靠 magic 互斥。
         # magic 檢查排在 version 檢查與所有金鑰操作之前，因此本案不需要能解開該容器的私鑰，
         # 直接以硬編碼的舊格式 header 樣板構造即可（可在任何機器重現）。
@@ -1151,15 +1189,15 @@ else {
         return ('0x01→0x{0:X2} 報竄改而非型別問題；{1}' -f $NewType, $ev)
     }
 
-    Invoke-Case 'C52' 'contentType 竄改 0x01→0x02 → 須報「被竄改」（證明已綁進 HKDF info）' {
+    Invoke-TCase 'C52' 'contentType 竄改 0x01→0x02 → 須報「被竄改」（證明已綁進 HKDF info）' {
         Test-ContentTypeFlip -NewType 2 -Tag '02'
     }
 
-    Invoke-Case 'C53' 'contentType 竄改 0x01→0xFF → 須報「被竄改」而非型別不支援' {
+    Invoke-TCase 'C53' 'contentType 竄改 0x01→0xFF → 須報「被竄改」而非型別不支援' {
         Test-ContentTypeFlip -NewType 255 -Tag 'ff'
     }
 
-    Invoke-Case 'C54' '合法的 contentType 0x03 容器 → 須報「由較新版本產生」' {
+    Invoke-TCase 'C54' '合法的 contentType 0x03 容器 → 須報「由較新版本產生」' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 還原 KDF 參數才能偽造密碼學上合法的容器' }
         # 以 contentType = 0x03 完整走一次派生與加密：tag 必然驗得過，
         # 此時型別仍未知，正確的結論是「本程式版本落後」，不是「資料被竄改」。
@@ -1176,7 +1214,7 @@ else {
         return ('0x03 遭拒且訊息指向版本落後：' + (Squash $r.All 90))
     }
 
-    Invoke-Case 'C15' '錯誤私鑰（另一組 P-256 blob）→ 報解鑰失敗' {
+    Invoke-TCase 'C15' '錯誤私鑰（另一組 P-256 blob）→ 報解鑰失敗' {
         $r = Invoke-UnpackOnly -Txt $script:CtTree -KeyFile $script:KeyB.KeyPath -DestName 'wrongkey'
         Assert (-not $r.TimedOut) '子行程逾時'
         Assert ($r.Failed) '用不匹配的私鑰竟然解包成功'
@@ -1191,12 +1229,12 @@ else {
         return ("環節={0}；msg={1}；未寫出任何檔案" -f $stage, (Squash $r.All 70))
     }
 
-    Invoke-Case 'C16' '私鑰檔不存在 / 讀不到 → 報私鑰讀取失敗' {
+    Invoke-TCase 'C16' '私鑰檔不存在 / 讀不到 → 報私鑰讀取失敗' {
         $r = Invoke-UnpackOnly -Txt $script:CtTree -KeyFile (Join-Path $script:Work 'no_such_dir\private.key') -DestName 'nokey'
         return (Expect-Failure $r 'key' '私鑰路徑不存在')
     }
 
-    Invoke-Case 'C17' '截斷容器（只留一半 base64）→ 指明環節' {
+    Invoke-TCase 'C17' '截斷容器（只留一半 base64）→ 指明環節' {
         $c = Read-Container $script:CtTree
         $half = [int]($c.Bytes.Length / 2)
         $b = [byte[]]$c.Bytes[0..($half - 1)]
@@ -1209,7 +1247,7 @@ else {
         return ('截半 {0}B→{1}B；{2}' -f $c.Bytes.Length, $half, (Squash $r.All 90))
     }
 
-    Invoke-Case 'C18' '非 base64 內容 → 報 base64/編碼環節錯誤' {
+    Invoke-TCase 'C18' '非 base64 內容 → 報 base64/編碼環節錯誤' {
         $t = Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'notb64.txt'
         [System.IO.File]::WriteAllText($t, "這不是 base64 !!! @@@@`r`n###`r`n", $script:Utf8NoBom)
         $r = Invoke-UnpackOnly -Txt $t -KeyFile $script:KeyA.KeyPath -DestName 'notb64'
@@ -1219,7 +1257,7 @@ else {
         return (Squash $r.All 100)
     }
 
-    Invoke-Case 'C19' '偽造容器（tag 合法但明文非 Brotli）→ 報解壓失敗' {
+    Invoke-TCase 'C19' '偽造容器（tag 合法但明文非 Brotli）→ 報解壓失敗' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 還原 KDF 參數才能偽造合法容器' }
         # 用受測物自己的容器換掉密文：以相同金鑰重新加密一段非 Brotli 明文
         $c = Read-Container $script:CtSingle
@@ -1243,20 +1281,20 @@ else {
         return (Expect-Failure $r 'unzip' 'tag 正確但明文非 Brotli')
     }
 
-    Invoke-Case 'C20' 'OutFile 已存在且未加 -Force → 報錯且不覆蓋' {
+    Invoke-TCase 'C20' 'OutFile 已存在且未加 -Force → 報錯且不覆蓋' {
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'exists.txt'
         [System.IO.File]::WriteAllText($out, 'SENTINEL-DO-NOT-OVERWRITE', $script:Utf8NoBom)
         $before = Get-Sha $out
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
         $ev = Expect-Failure $r 'exists' '輸出檔已存在'
         Assert ((Get-Sha $out) -eq $before) '未加 -Force 卻覆蓋了既有檔案'
         return ("$ev；原檔內容未變")
     }
 
-    Invoke-Case 'C21' '-Force 可覆蓋既有 OutFile' {
+    Invoke-TCase 'C21' '-Force 可覆蓋既有 OutFile' {
         $out = Join-Path $script:Work 'out\exists.txt'
         $before = Get-Sha $out
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out, '-Force') -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out, '-Force') -EnvVars $script:KeyA.Sandbox.Env
         [void](Expect-Success $r 'Pack -Force')
         Assert ((Get-Sha $out) -ne $before) '-Force 未覆蓋'
         $c = Read-Container $out
@@ -1264,18 +1302,18 @@ else {
         return ('已覆蓋並產生合法容器 {0}B' -f $c.Bytes.Length)
     }
 
-    Invoke-Case 'C22' 'wildcard 空匹配 → 報錯' {
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'emptywild\*.txt'), '-OutFile', (Join-Path $script:Work 'out\empty.txt')) -EnvVars $script:KeyA.Sandbox.Env
+    Invoke-TCase 'C22' 'wildcard 空匹配 → 報錯' {
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'emptywild\*.txt'), '-OutFile', (Join-Path $script:Work 'out\empty.txt')) -EnvVars $script:KeyA.Sandbox.Env
         $ev = Expect-Failure $r 'nomatch' 'wildcard 無匹配'
         Assert (-not [System.IO.File]::Exists((Join-Path $script:Work 'out\empty.txt'))) '空匹配卻仍產生輸出檔'
         return ("$ev；未產生輸出")
     }
 
-    Invoke-Case 'C23' '~\.rune\public.pem 不存在 → 報找不到公鑰且不產生輸出檔' {
+    Invoke-TCase 'C23' '~\.rune\public.pem 不存在 → 報找不到公鑰且不產生輸出檔' {
         $sb = New-HomeSandbox -Name 'nopub'
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'nopub.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
-        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
         Assert (-not $r.TimedOut) '子行程逾時'
         Assert ($r.Failed) '家目錄沒有 public.pem 卻仍打包成功'
         Assert (-not [System.IO.File]::Exists($out)) '找不到公鑰卻仍產生了輸出檔'
@@ -1288,13 +1326,13 @@ else {
         return (Squash $r.All 130)
     }
 
-    Invoke-Case 'C24' '輸入路徑不存在 → 報錯' {
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'no_such_file.bin'), '-OutFile', (Join-Path $script:Work 'out\nosrc.txt')) -EnvVars $script:KeyA.Sandbox.Env
+    Invoke-TCase 'C24' '輸入路徑不存在 → 報錯' {
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'no_such_file.bin'), '-OutFile', (Join-Path $script:Work 'out\nosrc.txt')) -EnvVars $script:KeyA.Sandbox.Env
         return (Expect-Failure $r 'input' '輸入不存在')
     }
 
     Write-Host ''
-    Write-Host '-- CLI / 預設檔名 --' -ForegroundColor Cyan
+    Write-Host "-- CLI / 預設檔名（$TrackLabel）--" -ForegroundColor Cyan
 
     function Test-DefaultName {
         param([string]$InputPath, [string]$Expected, [string]$Tag)
@@ -1306,7 +1344,7 @@ else {
             $p = Join-Path $d $Expected
             if ([System.IO.File]::Exists($p)) { [System.IO.File]::Delete($p) }
         }
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', $InputPath) -EnvVars $script:KeyA.Sandbox.Env -WorkDir $cwd
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $InputPath) -EnvVars $script:KeyA.Sandbox.Env -WorkDir $cwd
         [void](Expect-Success $r "Pack(預設檔名 $Tag)")
         $found = $null
         foreach ($d in @($cwd, $inDir, $inParent)) {
@@ -1320,23 +1358,23 @@ else {
         return ("產生 $Expected（$where），{0}B" -f $c.Bytes.Length)
     }
 
-    Invoke-Case 'C25' '預設檔名：單檔 report.docx → report.docx.txt' {
+    Invoke-TCase 'C25' '預設檔名：單檔 report.docx → report.docx.txt' {
         Test-DefaultName -InputPath (Join-Path $script:Fx 'naming\report.docx') -Expected 'report.docx.txt' -Tag 'file'
     }
 
-    Invoke-Case 'C26' '預設檔名：資料夾 project → project.txt' {
+    Invoke-TCase 'C26' '預設檔名：資料夾 project → project.txt' {
         Test-DefaultName -InputPath (Join-Path $script:Fx 'naming\project') -Expected 'project.txt' -Tag 'dir'
     }
 
-    Invoke-Case 'C27' '預設檔名：wildcard → 父資料夾名.txt' {
+    Invoke-TCase 'C27' '預設檔名：wildcard → 父資料夾名.txt' {
         Test-DefaultName -InputPath (Join-Path $script:Fx 'naming\wcdir\*.txt') -Expected 'wcdir.txt' -Tag 'wild'
     }
 
-    Invoke-Case 'C28' 'Pack 完成印出輸出路徑與大小統計' {
+    Invoke-TCase 'C28' 'Pack 完成印出輸出路徑與大小統計' {
         $src = Join-Path $script:Fx 'redundant\big.txt'
         $out = Join-Path $script:Work 'out\stats.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', $src, '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env -Timeout 300
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $src, '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env -Timeout 300
         [void](Expect-Success $r 'Pack(stats)')
         $o = $r.StdOut
         Assert ($o -match [regex]::Escape('stats.txt')) ('輸出未提及輸出檔路徑：' + (Squash $o 150))
@@ -1345,21 +1383,30 @@ else {
         return (Squash $o 110)
     }
 
-    Invoke-Case 'C29' 'parameter set 互斥：-Pack 與 -Unpack 併用 → 報錯' {
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-Unpack', $script:CtTree, '-Destination', (New-Dir (Join-Path $script:Work 'unpack\mix'))) -EnvVars $script:KeyA.Sandbox.Env
-        return (Expect-Failure $r 'param' '-Pack 與 -Unpack 併用')
+    Invoke-TCase 'C29' 'parameter set 互斥／各產物拒絕對方參數：-Pack 與 -Unpack 併用 → 報錯' {
+        if ($SealScript -eq $OpenScript) {
+            $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-Unpack', $script:CtTree, '-Destination', (New-Dir (Join-Path $script:Work 'unpack\mix'))) -EnvVars $script:KeyA.Sandbox.Env
+            return (Expect-Failure $r 'param' '-Pack 與 -Unpack 併用（合體版 ParameterSet 互斥）')
+        }
+        else {
+            $r1 = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Unpack', $script:CtTree, '-Destination', (New-Dir (Join-Path $script:Work 'unpack\mix1'))) -EnvVars $script:KeyA.Sandbox.Env
+            $ev1 = Expect-Failure $r1 'param' 'rune-seal.ps1 收到 -Unpack'
+            $r2 = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin')) -EnvVars $script:KeyA.Sandbox.Env
+            $ev2 = Expect-Failure $r2 'param' 'rune-open.ps1 收到 -Pack'
+            return ("seal 拒絕 -Unpack（$ev1）；open 拒絕 -Pack（$ev2）")
+        }
     }
 
-    Invoke-Case 'C30' '-Unpack 缺 -Destination → 報錯（不得卡在互動）' {
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtTree, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env -Timeout 45
+    Invoke-TCase 'C30' '-Unpack 缺 -Destination → 報錯（不得卡在互動）' {
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtTree, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env -Timeout 45
         Assert (-not $r.TimedOut) '缺 -Destination 時卡住（Mandatory 提示無法在非互動下結束）'
         return (Expect-Failure $r 'param' '缺 -Destination')
     }
 
     Write-Host ''
-    Write-Host '-- 金鑰儲存 / GenerateKeys --' -ForegroundColor Cyan
+    Write-Host "-- 金鑰儲存 / GenerateKeys（$TrackLabel）--" -ForegroundColor Cyan
 
-    Invoke-Case 'C31' '私鑰檔為 DPAPI blob（非明文 PEM）' {
+    Invoke-TCase 'C31' '私鑰檔為 DPAPI blob（非明文 PEM）' {
         $b = [System.IO.File]::ReadAllBytes($script:KeyA.KeyPath)
         $ascii = [System.Text.Encoding]::ASCII.GetString($b)
         Assert ($ascii -notmatch 'PRIVATE KEY') '私鑰檔含 "PRIVATE KEY" 明文字樣（未加密儲存）'
@@ -1375,16 +1422,16 @@ else {
         return ('{0}B 二進位，無 PEM 字樣，可列印比 {1:P0}；{2}' -f $b.Length, ($printable / $b.Length), $note)
     }
 
-    Invoke-Case 'C32' '同帳號以 DPAPI 私鑰 Unpack 成功（-KeyFile 指定）' {
+    Invoke-TCase 'C32' '同帳號以 DPAPI 私鑰 Unpack 成功（-KeyFile 指定）' {
         $dest = New-Dir (Join-Path $script:Work 'unpack\dpapi')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
         [void](Expect-Success $r 'Unpack(DPAPI)')
         Assert ((Get-TreeMap $dest).Count -eq 3) '解出檔案數不符'
         return ('DPAPI blob 解鑰成功，還原 3 檔')
     }
 
-    Invoke-Case 'C33' '-KeyFile 預設值 ~\.rune\private.key（不給 -KeyFile 也能解）' {
+    Invoke-TCase 'C33' '-KeyFile 預設值 ~\.rune\private.key（不給 -KeyFile 也能解）' {
         $dest = New-Dir (Join-Path $script:Work 'unpack\defaultkey')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
         $expected = Join-Path $script:KeyA.Sandbox.Path '.rune\private.key'
@@ -1392,22 +1439,22 @@ else {
             [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($expected))
             [System.IO.File]::Copy($script:KeyA.KeyPath, $expected, $true)
         }
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest) -EnvVars $script:KeyA.Sandbox.Env
         [void](Expect-Success $r 'Unpack(預設 KeyFile)')
         Assert ((Get-TreeMap $dest).Count -eq 3) '解出檔案數不符'
         return ('未指定 -KeyFile，從 ~\.rune\private.key 讀取成功')
     }
 
-    Invoke-Case 'C34' '-GenerateKeys 私鑰已存在時拒絕覆蓋' {
+    Invoke-TCase 'C34' '-GenerateKeys 私鑰已存在時拒絕覆蓋' {
         $before = Get-Sha $script:KeyA.KeyPath
-        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-GenerateKeys') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-GenerateKeys') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
         [void](Assert-NoHomeEscape -When 'C34')
         $ev = Expect-Failure $r 'exists' '私鑰已存在'
         Assert ((Get-Sha $script:KeyA.KeyPath) -eq $before) '既有私鑰被覆蓋了'
         return ("$ev；既有私鑰 SHA 未變")
     }
 
-    Invoke-Case 'C35' '-GenerateKeys 印出公鑰 PEM、public.pem 路徑與指紋' {
+    Invoke-TCase 'C35' '-GenerateKeys 印出公鑰 PEM、public.pem 路徑與指紋' {
         $o = $script:KeyA.Result.All
         Assert ($null -ne (Get-PemBlock -Text $o)) '未印出 PUBLIC KEY PEM'
         Assert ($o -match 'public\.pem') '未指引使用者把 public.pem 交給加密端'
@@ -1425,50 +1472,50 @@ else {
         return $null
     }
 
-    Invoke-Case 'C55' '-PublicKey 收 PEM 字串本體：家目錄無 public.pem 也能加密' {
+    Invoke-TCase 'C55' '-PublicKey 收 PEM 字串本體：家目錄無 public.pem 也能加密' {
         $sb = New-HomeSandbox -Name 'pkstr'      # 這個沙箱刻意「沒有」public.pem
         $src = Join-Path $script:Fx 'single\payload.bin'
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'pkstring.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
 
-        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', $src, '-OutFile', $out, '-PublicKey', $script:PubPemA) -EnvVars $sb.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $src, '-OutFile', $out, '-PublicKey', $script:PubPemA) -EnvVars $sb.Env
         [void](Expect-Success $r 'Pack(-PublicKey 收 PEM 字串)')
         $c = Read-Container $out
         Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2 -and $c.ContentType -eq 1) '產物不是合法的 RUNE v2 容器'
 
         $dest = New-Dir (Join-Path $script:Work 'unpack\pkstring')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(-PublicKey 收 PEM 字串)')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(-PublicKey 收 PEM 字串)')
         $d = Compare-MapExact @{ 'payload.bin' = (Get-Sha $src) } (Get-TreeMap $dest)
         Assert ($null -eq $d) $d
         return ('家目錄無 public.pem，僅靠 -PublicKey 的 PEM 字串完成加密，且以金鑰 A 位元一致還原')
     }
 
-    Invoke-Case 'C56' '-PublicKey 收檔案路徑：可用非預設位置的公鑰檔' {
+    Invoke-TCase 'C56' '-PublicKey 收檔案路徑：可用非預設位置的公鑰檔' {
         $sb = New-HomeSandbox -Name 'pkpath'     # 同樣沒有 public.pem
         $pemFile = New-TextFile (Join-Path $script:Work 'keys\alice.pem') $script:PubPemA
         $src = Join-Path $script:Fx 'single\payload.bin'
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'pkpath.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
 
-        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', $src, '-OutFile', $out, '-PublicKey', $pemFile) -EnvVars $sb.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', $src, '-OutFile', $out, '-PublicKey', $pemFile) -EnvVars $sb.Env
         [void](Expect-Success $r 'Pack(-PublicKey 收檔案路徑)')
 
         $dest = New-Dir (Join-Path $script:Work 'unpack\pkpath')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(-PublicKey 收檔案路徑)')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(-PublicKey 收檔案路徑)')
         $d = Compare-MapExact @{ 'payload.bin' = (Get-Sha $src) } (Get-TreeMap $dest)
         Assert ($null -eq $d) $d
         return ('以 -PublicKey <路徑> 讀取非預設位置的公鑰檔，roundtrip 位元一致')
     }
 
-    Invoke-Case 'C57' '公鑰指紋：格式穩定、seal 與 -GenerateKeys 逐字一致且可獨立重算' {
+    Invoke-TCase 'C57' '公鑰指紋：格式穩定、seal 與 -GenerateKeys 逐字一致且可獨立重算' {
         $genFp = Get-Fingerprint -Text $script:KeyA.Result.All
         Assert ($null -ne $genFp) ('-GenerateKeys 未印出 RUNE-KEY 指紋（8 組 ×4 大寫 hex）：' + (Squash $script:KeyA.Result.All 200))
 
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'fp.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
-        $p = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
+        $p = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
         [void](Expect-Success $p 'Pack(指紋)')
         $sealFp = Get-Fingerprint -Text $p.StdOut
         Assert ($null -ne $sealFp) ('-Pack 未印出 RUNE-KEY 指紋：' + (Squash $p.StdOut 200))
@@ -1483,13 +1530,13 @@ else {
         return ('RUNE-KEY {0}；兩端逐字一致且等於 SHA-256(SPKI DER)[0..15]' -f $expect)
     }
 
-    Invoke-Case 'C58' '-ExportPublicKey 可從既有私鑰重建 public.pem，指紋不變' {
+    Invoke-TCase 'C58' '-ExportPublicKey 可從既有私鑰重建 public.pem，指紋不變' {
         $pub = $script:KeyA.Sandbox.PubPath
         Assert ([System.IO.File]::Exists($pub)) '前置 P6 未通過（沙箱沒有 public.pem）'
         $backup = [System.IO.File]::ReadAllText($pub)
         [System.IO.File]::Delete($pub)
         try {
-            $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-ExportPublicKey') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
+            $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-ExportPublicKey') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
             [void](Assert-NoHomeEscape -When 'C58')
             [void](Expect-Success $r '-ExportPublicKey')
             Assert ([System.IO.File]::Exists($pub)) '-ExportPublicKey 未重建 public.pem'
@@ -1512,14 +1559,14 @@ else {
         }
     }
 
-    Invoke-Case 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' {
+    Invoke-TCase 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' {
         Assert ($null -ne $script:KeyB.PublicPem) '前置 P5 未取得金鑰 B 的公鑰'
         $sb = New-HomeSandbox -Name 'swap'
         [void](New-TextFile $sb.PubPath $script:KeyB.PublicPem)
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'swapped.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
 
-        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
         [void](Expect-Success $r 'Pack(掉包後的 public.pem)')
         $fpB = Get-Fingerprint -Text $r.StdOut
         $fpA = Get-Fingerprint -Text $script:KeyA.Result.All
@@ -1534,9 +1581,9 @@ else {
     }
 
     Write-Host ''
-    Write-Host '-- 隱藏案例（由規格不變量推導）--' -ForegroundColor Cyan
+    Write-Host "-- 隱藏案例（由規格不變量推導，$TrackLabel）--" -ForegroundColor Cyan
 
-    Invoke-Case 'C36' '0 byte 檔單獨打包 roundtrip' {
+    Invoke-TCase 'C36' '0 byte 檔單獨打包 roundtrip' {
         $src = New-BinFile (Join-Path $script:Work 'fixtures\zero\empty.dat') 0
         $r = Invoke-Roundtrip -Name 'zero' -Source $src
         $act = Get-TreeMap $r.Dest
@@ -1545,7 +1592,7 @@ else {
         return ('0 byte 檔還原成功（SHA e3b0c442…）')
     }
 
-    Invoke-Case 'C37' '解包不得逸出 Destination（zip 路徑安全）' {
+    Invoke-TCase 'C37' '解包不得逸出 Destination（zip 路徑安全）' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 還原 KDF 參數才能構造惡意 zip' }
         # 自製含 ../ 項目的 zip -> Brotli -> 用受測物公鑰做 ECDH 加密
         $ms = [System.IO.MemoryStream]::new()
@@ -1590,7 +1637,7 @@ else {
         $t = Write-Container -Bytes $all.ToArray() -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'zipslip.txt')
 
         $dest = New-Dir (Join-Path $script:Work 'unpack\zipslip\inner')
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
         $outside = Join-Path $script:Work 'unpack\zipslip\escaped.txt'
         $leaked = [System.IO.File]::Exists($outside)
         if ($leaked) { [System.IO.File]::Delete($outside) }
@@ -1598,10 +1645,10 @@ else {
         return ('../escaped.txt 未逸出（exit={0}）：{1}' -f $r.ExitCode, (Squash $r.All 70))
     }
 
-    Invoke-Case 'C38' 'Destination 不存在時的行為（規格未定義，僅記錄）' {
+    Invoke-TCase 'C38' 'Destination 不存在時的行為（規格未定義，僅記錄）' {
         $dest = Join-Path $script:Work 'unpack\nonexistent_dest'
         if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
         if (-not $r.Failed) {
             Assert ((Get-TreeMap $dest).Count -eq 3) '宣稱成功但檔案不齊'
             Info-Case '自動建立不存在的 Destination 並解出 3 檔'
@@ -1609,18 +1656,18 @@ else {
         Info-Case ('明確報錯而不自動建立：' + (Squash $r.All 80))
     }
 
-    Invoke-Case 'C39' '同一容器重複解包兩次結果一致（冪等）' {
+    Invoke-TCase 'C39' '同一容器重複解包兩次結果一致（冪等）' {
         $d1 = New-Dir (Join-Path $script:Work 'unpack\idem1')
         $d2 = New-Dir (Join-Path $script:Work 'unpack\idem2')
         foreach ($d in @($d1, $d2)) { Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force }
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtTree, '-Destination', $d1, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack#1')
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtTree, '-Destination', $d2, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack#2')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtTree, '-Destination', $d1, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack#1')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtTree, '-Destination', $d2, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack#2')
         $c = Compare-MapExact (Get-TreeMap $d1) (Get-TreeMap $d2)
         Assert ($null -eq $c) $c
         return ('兩次解包內容完全相同（{0} 檔）' -f (Get-TreeMap $d1).Count)
     }
 
-    Invoke-Case 'C41' 'zip-slip 變體：entry 名用反斜線 ..\ 不得逸出 Destination' {
+    Invoke-TCase 'C41' 'zip-slip 變體：entry 名用反斜線 ..\ 不得逸出 Destination' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 還原 KDF 參數才能構造惡意 zip' }
         $root = New-Dir (Join-Path $script:Work 'unpack\zipslip_back')
         $dest = New-Dir (Join-Path $root 'inner')
@@ -1629,7 +1676,7 @@ else {
 
         $t = New-ForgedRune -ZipBytes (New-ZipWithEntry -EntryName '..\pwned.txt') `
             -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'zipslip_backslash.txt')
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
 
         $leaked = [System.IO.File]::Exists($outside)
         $leakBody = if ($leaked) { [System.IO.File]::ReadAllText($outside) } else { '' }
@@ -1642,14 +1689,14 @@ else {
         return ("反斜線 ..\pwned.txt 遭拒且未逸出，exit={0}；{1}" -f $r.ExitCode, (Squash $r.All 70))
     }
 
-    Invoke-Case 'C42' 'wildcard 命中子目錄：須出聲警告，且解包後不留空目錄' {
+    Invoke-TCase 'C42' 'wildcard 命中子目錄：須出聲警告，且解包後不留空目錄' {
         $dir = New-Dir (Join-Path $script:Fx 'wcdir_sub')
         [void](New-TextFile (Join-Path $dir 'top.txt') 'top level file')
         [void](New-TextFile (Join-Path $dir 'subfolder\inside.txt') 'INSIDE-MUST-NOT-VANISH-SILENTLY')
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'wcdir_sub.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
 
-        $p = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Pack', (Join-Path $dir '*'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
+        $p = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $dir '*'), '-OutFile', $out) -EnvVars $script:KeyA.Sandbox.Env
         Assert (-not $p.TimedOut) 'Pack 逾時'
         Assert ($p.ExitCode -eq 0) ('Pack 應成功（僅需警告）但 exit={0}：{1}' -f $p.ExitCode, (Squash $p.All 160))
         Assert ([System.IO.File]::Exists($out)) 'Pack 未產生輸出檔'
@@ -1658,7 +1705,7 @@ else {
 
         $dest = New-Dir (Join-Path $script:Work 'unpack\wcdir_sub')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(wcdir_sub)')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(wcdir_sub)')
 
         $files = Get-TreeMap $dest
         $dirs = @([System.IO.Directory]::EnumerateDirectories($dest, '*', [System.IO.SearchOption]::AllDirectories))
@@ -1669,7 +1716,7 @@ else {
         return ('已警告且只還原 top.txt、無空目錄；warn=' + (Squash $warn 70))
     }
 
-    Invoke-Case 'C43' '資料夾模式須保留空子目錄（含巢狀空目錄）' {
+    Invoke-TCase 'C43' '資料夾模式須保留空子目錄（含巢狀空目錄）' {
         $dir = New-Dir (Join-Path $script:Fx 'emptydirs')
         [void](New-TextFile (Join-Path $dir 'keep\file.txt') 'only real file')
         [void](New-Dir (Join-Path $dir '空目錄'))
@@ -1688,7 +1735,7 @@ else {
         return ('空目錄 與 空目錄2/深層空 皆保留;檔案 {0} 筆 SHA 一致;{1}' -f $files.Count, $c.Convention)
     }
 
-    Invoke-Case 'C44' '解包中途失敗須回滾：Destination 無殘留、無暫存資料夾' {
+    Invoke-TCase 'C44' '解包中途失敗須回滾：Destination 無殘留、無暫存資料夾' {
         if ($null -eq $script:KdfInfo) { Skip-Case '需 C08 還原 KDF 參數才能構造中途失敗的封存' }
         # 前兩筆合法、第三筆不安全 -> 前兩筆會先落地，之後才拋錯，藉此驗回滾
         $ms = [System.IO.MemoryStream]::new()
@@ -1703,7 +1750,7 @@ else {
         $root = New-Dir (Join-Path $script:Work 'unpack\rollback')
         $dest = New-Dir (Join-Path $root 'dest')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
 
         $outside = Join-Path $root 'evil.txt'
         $leaked = [System.IO.File]::Exists($outside)
@@ -1717,7 +1764,7 @@ else {
         return ('前 2 筆合法 + 第 3 筆不安全 -> 失敗且 Destination 完全乾淨；' + (Squash $r.All 70))
     }
 
-    Invoke-Case 'C45' 'public.pem 內容為 P-384 → 須明確報曲線不符' {
+    Invoke-TCase 'C45' 'public.pem 內容為 P-384 → 須明確報曲線不符' {
         $sb = New-HomeSandbox -Name 'p384'
         $p384 = [System.Security.Cryptography.ECDiffieHellman]::Create([System.Security.Cryptography.ECCurve+NamedCurves]::nistP384)
         $pem = ConvertTo-Pem -Der $p384.ExportSubjectPublicKeyInfo() -Label 'PUBLIC KEY'
@@ -1725,7 +1772,7 @@ else {
         $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'p384.txt'
         if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
 
-        $r = Invoke-Transfer -ScriptPath $script:Sut -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutSeal -Arguments @('-Pack', (Join-Path $script:Fx 'single\payload.bin'), '-OutFile', $out) -EnvVars $sb.Env
         Assert (-not $r.TimedOut) '逾時'
         Assert ($r.Failed) 'P-384 公鑰竟然被接受並完成打包'
         Assert (-not [System.IO.File]::Exists($out)) '曲線不符卻仍產生了輸出檔'
@@ -1748,7 +1795,7 @@ else {
 
         $t = New-ForgedRune -ZipBytes (New-ZipWithDirEntry -EntryName $EntryName) `
             -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) "dirslip_$Tag.txt")
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $t, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
 
         $leaked = [System.IO.Directory]::Exists($outside)
         if ($leaked) { [System.IO.Directory]::Delete($outside, $true) }
@@ -1759,22 +1806,22 @@ else {
         return ("目錄 entry '$EntryName' 遭拒且未建出目錄，exit={0}；{1}" -f $r.ExitCode, (Squash $r.All 70))
     }
 
-    Invoke-Case 'C46' '目錄 entry 也要走 zip-slip 檢查：..\evil\（反斜線分支）' {
+    Invoke-TCase 'C46' '目錄 entry 也要走 zip-slip 檢查：..\evil\（反斜線分支）' {
         Test-DirEntrySlip -EntryName '..\evil\' -Tag 'back' -LeakName 'evil'
     }
 
-    Invoke-Case 'C47' '目錄 entry 也要走 zip-slip 檢查：../evil2/（包含性判斷分支）' {
+    Invoke-TCase 'C47' '目錄 entry 也要走 zip-slip 檢查：../evil2/（包含性判斷分支）' {
         Test-DirEntrySlip -EntryName '../evil2/' -Tag 'fwd' -LeakName 'evil2'
     }
 
-    Invoke-Case 'C48' '回滾搬移不得破壞 Destination 既有的無關內容' {
+    Invoke-TCase 'C48' '回滾搬移不得破壞 Destination 既有的無關內容' {
         $dest = New-Dir (Join-Path $script:Work 'unpack\merge')
         Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
         [void](New-TextFile (Join-Path $dest 'alpha.txt') 'OLD-CONTENT-WILL-COLLIDE')
         [void](New-TextFile (Join-Path $dest 'unrelated.txt') 'KEEP-ME')
         [void](New-TextFile (Join-Path $dest 'existingdir\note.txt') 'KEEP-ME-TOO')
 
-        $r = Invoke-Transfer -ScriptPath $script:SutKeyed -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
         [void](Expect-Success $r 'Unpack(既有內容合併)')
 
         # 硬性要求：與封存無關的既有資料不得被刪或改
@@ -1791,7 +1838,7 @@ else {
         return ("無關檔案/子目錄完好、無暫存殘留；$collide")
     }
 
-    Invoke-Case 'C49' '深層長路徑 roundtrip（暫存資料夾前綴不得撐爆路徑長度）' {
+    Invoke-TCase 'C49' '深層長路徑 roundtrip（暫存資料夾前綴不得撐爆路徑長度）' {
         $segs = @('層級目錄名稱abcdefghij') * 8
         $rel = ($segs -join '\')
         $srcRoot = Join-Path $script:Work 'fixtures\deeppath'
@@ -1808,15 +1855,24 @@ else {
         return ('相對路徑 {0} 字元、來源全長 {1} 字元，含 .rune-tmp 前綴仍完整還原' -f $rel.Length, $srcFile.Length)
     }
 
-    Invoke-Case 'C40' '原始受測腳本自始至終未被修改' {
-        $now = Get-Sha $script:Sut
-        Assert ($script:OrigHash -eq $now) '原始 transfer.ps1 在測試過程中被改動'
-        return ('SHA-256 {0}… 未變' -f $now.Substring(0, 16))
+    Invoke-TCase 'C40' '原始受測腳本（seal + open）自始至終未被修改' {
+        $nowSeal = Get-Sha $script:SutSeal
+        $nowOpen = Get-Sha $script:SutOpen
+        Assert ($script:OrigHashSeal -eq $nowSeal) 'seal 產物在測試過程中被改動'
+        Assert ($script:OrigHashOpen -eq $nowOpen) 'open 產物在測試過程中被改動'
+        return ('seal SHA-256 {0}… / open SHA-256 {1}… 皆未變' -f $nowSeal.Substring(0, 16), $nowOpen.Substring(0, 16))
     }
 }
 
 # ==============================================================================
-# 10. 報表
+# 10. 驅動兩軌
+# ==============================================================================
+
+Invoke-VerifyTrack -TrackLabel 'ALL' -SealScript $script:AllScript -OpenScript $script:AllScript
+Invoke-VerifyTrack -TrackLabel 'SPLIT' -SealScript $script:SealScript -OpenScript $script:OpenScript
+
+# ==============================================================================
+# 11. 報表
 # ==============================================================================
 
 $pass = @($script:Results | Where-Object Result -EQ 'PASS').Count
@@ -1839,14 +1895,14 @@ if ($script:EscapeNotes.Count) {
     $script:EscapeNotes | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
 }
 
-Write-Host ('總計 {0} 案：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
+Write-Host ('總計 {0} 案（ALL + SPLIT 兩軌合計）：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 Write-Host ('工作目錄：{0}' -f $script:Work)
 
 $reportPath = Join-Path $script:ReviewRoot 'verify-report.txt'
 $logPath = Join-Path $script:ReviewRoot 'verify-log.txt'
 $sb = [System.Text.StringBuilder]::new()
-[void]$sb.AppendLine('transfer.ps1 驗收報表（規格 v2）')
-[void]$sb.AppendLine('受測腳本：' + $TransferScript)
+[void]$sb.AppendLine('runepost 驗收報表（規格 v2，雙軌 ALL + SPLIT）')
+[void]$sb.AppendLine('RepoRoot：' + $script:RepoRoot)
 [void]$sb.AppendLine('時間：' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 [void]$sb.AppendLine('')
 [void]$sb.AppendLine(($table | Format-Table -AutoSize -Wrap | Out-String -Width 200))

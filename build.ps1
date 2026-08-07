@@ -52,11 +52,72 @@ if ([string]::IsNullOrWhiteSpace($OutDir)) {
 # 1. manifest —— 唯一的產物組成清單，build.ps1 絕不 glob src/
 #    key = 產物基底名（dist\<key>.ps1）；value = 依序組裝的 fragment 相對路徑陣列
 #
-#    現況（M4）：只有 rune-all 一個「合體版」產物，供切檔後與切檔前的 transfer.ps1
-#    逐位元組比對，證明切檔沒掉字、沒改順序。rune-seal / rune-open 兩個真產物於
-#    下一顆（M5a）加入，rune-all 屆時仍保留作為對照組，等雙軌驗證通過後才移除。
+#    M5a（雙軌期）：rune-seal / rune-open 是兩個真正的產物；rune-all 暫時保留
+#    作為對照組——若 seal / open 紅而 all 綠，問題必在 manifest 收錄而非程式邏輯。
+#    等 verify.ps1 證明三者等價後，下一顆（M5b）才移除 rune-all 與其專屬的
+#    shell/all-*.ps1。
 # ==========================================================================
 $Script:Manifest = [ordered]@{
+    'rune-seal' = @(
+        # --- shell：rune-seal 專屬 help / param / entry ---
+        'shell/seal-help.ps1'
+        'shell/seal-param.ps1'
+        # --- keystore：金鑰路徑說明與常數（seal / open 共用）---
+        'keystore/paths-doc.ps1'
+        # --- container：容器格式常數 ---
+        'container/format-spec.ps1'
+        'keystore/paths.ps1'
+        # --- filemode：打包 / ZIP 寫入 ---
+        'filemode/pack-plan.ps1'
+        'filemode/zip-write.ps1'
+        # --- codec：Brotli 壓縮方向 ---
+        'codec/brotli-compress.ps1'
+        # --- crypto / keystore：金鑰交換與派生 ---
+        'crypto/ecdh-keygen.ps1'
+        'keystore/fingerprint.ps1'
+        'keystore/public-key.ps1'
+        'crypto/kdf.ps1'
+        'crypto/aes-seal.ps1'
+        # --- container：容器組裝 ---
+        'container/write.ps1'
+        # --- flow：-Pack 主流程 ---
+        'flow/seal-main.ps1'
+        # --- shell：進入點 ---
+        'shell/seal-entry.ps1'
+    )
+    'rune-open' = @(
+        # --- shell：rune-open 專屬 help / param / entry ---
+        'shell/open-help.ps1'
+        'shell/open-param.ps1'
+        # --- keystore：金鑰路徑說明與常數（seal / open 共用）---
+        'keystore/paths-doc.ps1'
+        # --- container：容器格式常數 ---
+        'container/format-spec.ps1'
+        'keystore/paths.ps1'
+        # --- container：位元組工具 ---
+        'container/byte-range.ps1'
+        # --- crypto / keystore：金鑰交換與派生（-GenerateKeys 用得到 ecdh-keygen）---
+        'crypto/ecdh-keygen.ps1'
+        'keystore/fingerprint.ps1'
+        'crypto/kdf.ps1'
+        # --- codec / crypto：Brotli 解壓、ECDH 協議 ---
+        'codec/brotli-expand.ps1'
+        'crypto/ecdh-agree.ps1'
+        # --- container：容器解析 ---
+        'container/read.ps1'
+        # --- filemode：ZIP 解包 ---
+        'filemode/zip-read.ps1'
+        # --- keystore：私鑰載入 ---
+        'keystore/private-key.ps1'
+        # --- flow：-Unpack 主流程 ---
+        'flow/open-main.ps1'
+        # --- keystore：-GenerateKeys / -ExportPublicKey ---
+        'keystore/public-key-block.ps1'
+        'keystore/generate-keys.ps1'
+        'keystore/export-public-key.ps1'
+        # --- shell：進入點 ---
+        'shell/open-entry.ps1'
+    )
     'rune-all' = @(
         # --- shell：合體版專用的 help / param（等同原 transfer.ps1 1–72 行）---
         'shell/all-help.ps1'
