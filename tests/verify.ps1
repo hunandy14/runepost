@@ -817,6 +817,20 @@ function Invoke-VerifyTrack {
     Write-Host ''
     Write-Host '-- 前置 --' -ForegroundColor Cyan
 
+    Invoke-TCase 'P0' 'build.ps1 -Check 通過（dist/ 與 src/ 現況一致）' {
+        <#
+            DESIGN.md §6.2：dist/ 與 src/ 不同步（有人手動編輯 dist/、或改了 src/
+            忘了重跑 build.ps1）是「拆檔架構」最主要的漂移風險，P0 沒過就沒有意義
+            測下面任何案例——測到的可能是一份跟目前 src/ 對不上的舊產物。
+        #>
+        $buildPs1 = Join-Path $script:RepoRoot 'build.ps1'
+        Assert ([System.IO.File]::Exists($buildPs1)) "找不到 build.ps1：$buildPs1"
+        $out = & $script:Pwsh -NoProfile -NoLogo -File $buildPs1 -Check 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        Assert ($exitCode -eq 0) ("build.ps1 -Check 失敗（exit={0}）：dist/ 與 src/ 現況不一致 => {1}" -f $exitCode, (Squash $out 300))
+        return (Squash $out 150)
+    }
+
     Invoke-TCase 'P1a' '受測腳本存在且語法可解析（seal）' {
         Assert ([System.IO.File]::Exists($SealScript)) "找不到受測腳本（seal）：$SealScript"
         $script:SutSeal = [System.IO.Path]::GetFullPath($SealScript)
