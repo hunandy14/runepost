@@ -95,7 +95,211 @@ function Get-ByteRange {
 }
 
 # ==========================================================================
-# 區塊：-Pack 主流程（骨架，待下一個里程碑實作）
+# 區塊：打包（ZIP / store，UTF-8 檔名）
+# ==========================================================================
+
+function Get-CtxtPackPlan {
+    <#
+        依 -Pack 參數判斷輸入型態（單檔 / wildcard / 資料夾），
+        回傳要打包的項目清單，以及推導輸出檔名用的基底名稱。
+    #>
+    param([string] $PackPath)
+
+    if ($PackPath -match '[*?]') {
+        # --- wildcard：Get-Item 展開，僅當層不遞迴 ---
+        $items = @(Get-Item -Path $PackPath -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0) {
+            throw "找不到符合萬用字元的項目：$PackPath"
+        }
+        $parent = Split-Path -Path $PackPath -Parent
+        if ([string]::IsNullOrEmpty($parent)) {
+            $parent = (Get-Location).Path
+        }
+        else {
+            $parent = (Resolve-Path -LiteralPath $parent).Path
+        }
+        $entries = foreach ($item in $items) {
+            [pscustomobject]@{
+                EntryName   = $item.Name
+                SourcePath  = $item.FullName
+                IsDirectory = $item.PSIsContainer
+            }
+        }
+        return [pscustomobject]@{
+            Entries         = @($entries)
+            DefaultBaseName = (Split-Path -Path $parent -Leaf)
+        }
+    }
+    elseif (Test-Path -LiteralPath $PackPath -PathType Container) {
+        # --- 資料夾：遞迴整包，保留子目錄結構 ---
+        $root = (Get-Item -LiteralPath $PackPath).FullName.TrimEnd('\', '/')
+        $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)
+        if ($files.Count -eq 0) {
+            throw "資料夾內沒有可打包的檔案：$PackPath"
+        }
+        $entries = foreach ($f in $files) {
+            $rel = $f.FullName.Substring($root.Length + 1) -replace '\\', '/'
+            [pscustomobject]@{
+                EntryName   = $rel
+                SourcePath  = $f.FullName
+                IsDirectory = $false
+            }
+        }
+        return [pscustomobject]@{
+            Entries         = @($entries)
+            DefaultBaseName = (Split-Path -Path $root -Leaf)
+        }
+    }
+    elseif (Test-Path -LiteralPath $PackPath -PathType Leaf) {
+        # --- 單檔 ---
+        $file = Get-Item -LiteralPath $PackPath
+        return [pscustomobject]@{
+            Entries         = @([pscustomobject]@{
+                EntryName   = $file.Name
+                SourcePath  = $file.FullName
+                IsDirectory = $false
+            })
+            DefaultBaseName = $file.Name
+        }
+    }
+    else {
+        throw "找不到指定的路徑：$PackPath"
+    }
+}
+
+function New-CtxtZipBytes {
+    <# 依項目清單建立 ZIP（store，UTF-8 檔名），回傳位元組陣列 #>
+    param([object[]] $Entries)
+
+    $ms = [System.IO.MemoryStream]::new()
+    $zip = [System.IO.Compression.ZipArchive]::new(
+        $ms, [System.IO.Compression.ZipArchiveMode]::Create, $true, [System.Text.Encoding]::UTF8)
+    try {
+        foreach ($e in $Entries) {
+            if ($e.IsDirectory) {
+                $dirName = ($e.EntryName -replace '\\', '/').TrimEnd('/') + '/'
+                [void]$zip.CreateEntry($dirName, [System.IO.Compression.CompressionLevel]::NoCompression)
+                continue
+            }
+            $entry = $zip.CreateEntry($e.EntryName, [System.IO.Compression.CompressionLevel]::NoCompression)
+            $entryStream = $entry.Open()
+            try {
+                $fileStream = [System.IO.File]::OpenRead($e.SourcePath)
+                try {
+                    $fileStream.CopyTo($entryStream)
+                }
+                finally {
+                    $fileStream.Dispose()
+                }
+            }
+            finally {
+                $entryStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+    return , $ms.ToArray()
+}
+
+# ==========================================================================
+# 區塊：壓縮（Brotli）— 壓縮方向
+# ==========================================================================
+
+function Compress-CtxtBrotli {
+    param([byte[]] $InputBytes)
+    $outMs = [System.IO.MemoryStream]::new()
+    $brotli = [System.IO.Compression.BrotliStream]::new(
+        $outMs, [System.IO.Compression.CompressionLevel]::SmallestSize, $true)
+    try {
+        $brotli.Write($InputBytes, 0, $InputBytes.Length)
+    }
+    finally {
+        $brotli.Dispose()
+    }
+    return , $outMs.ToArray()
+}
+
+# ==========================================================================
+# 區塊：加密 — 加密方向（AES-256-GCM + RSA-4096-OAEP-SHA256 包裹金鑰）
+# ==========================================================================
+
+function Protect-CtxtAesGcm {
+    <# 產生一次性 AES-256 金鑰與 12B nonce，GCM 加密，回傳 Key/Nonce/Tag/Ciphertext #>
+    param([byte[]] $PlainBytes)
+
+    $key = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
+    $nonce = [byte[]]::new($Script:NonceLength)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($nonce)
+    $tag = [byte[]]::new($Script:TagLength)
+    $cipherBytes = [byte[]]::new($PlainBytes.Length)
+
+    $aesGcm = [System.Security.Cryptography.AesGcm]::new($key, $Script:TagLength)
+    try {
+        $aesGcm.Encrypt($nonce, $PlainBytes, $cipherBytes, $tag)
+    }
+    finally {
+        $aesGcm.Dispose()
+    }
+
+    return [pscustomobject]@{
+        Key        = $key
+        Nonce      = $nonce
+        Tag        = $tag
+        Ciphertext = $cipherBytes
+    }
+}
+
+function Protect-CtxtAesKey {
+    <# 用 RSA 公鑰（OAEP-SHA256）包裹 AES 金鑰 #>
+    param(
+        [byte[]] $AesKey,
+        [string] $PublicKeyPemText
+    )
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    try {
+        try {
+            $rsa.ImportFromPem($PublicKeyPemText)
+        }
+        catch {
+            throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"
+        }
+        return $rsa.Encrypt($AesKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+    }
+    finally {
+        $rsa.Dispose()
+    }
+}
+
+# ==========================================================================
+# 區塊：容器二進位格式組裝
+# ==========================================================================
+
+function New-CtxtContainer {
+    param(
+        [byte[]] $WrappedKey,
+        [byte[]] $Nonce,
+        [byte[]] $Tag,
+        [byte[]] $Ciphertext
+    )
+    $magicBytes = [System.Text.Encoding]::ASCII.GetBytes($Script:CtxtMagic)
+    $lenBytes = [BitConverter]::GetBytes([uint16] $WrappedKey.Length)
+
+    $ms = [System.IO.MemoryStream]::new()
+    $ms.Write($magicBytes, 0, $magicBytes.Length)
+    $ms.WriteByte($Script:CtxtVersion)
+    $ms.Write($lenBytes, 0, 2)
+    $ms.Write($WrappedKey, 0, $WrappedKey.Length)
+    $ms.Write($Nonce, 0, $Nonce.Length)
+    $ms.Write($Tag, 0, $Tag.Length)
+    $ms.Write($Ciphertext, 0, $Ciphertext.Length)
+    return , $ms.ToArray()
+}
+
+# ==========================================================================
+# 區塊：-Pack 主流程
 # ==========================================================================
 
 function Invoke-CtxtPack {
@@ -104,7 +308,51 @@ function Invoke-CtxtPack {
         [string] $OutFilePath,
         [switch] $ForceOverwrite
     )
-    throw '尚未實作：-Pack'
+
+    if ([string]::IsNullOrWhiteSpace($PublicKeyPem)) {
+        throw '尚未設定公鑰：請先在解密端執行 -GenerateKeys 產生金鑰對，並將印出的公鑰 PEM 貼入本腳本頂部的 $PublicKeyPem 變數後再重新執行 -Pack。'
+    }
+
+    $plan = Get-CtxtPackPlan -PackPath $PackPath
+    if (-not $plan.Entries -or $plan.Entries.Count -eq 0) {
+        throw "沒有可打包的項目（路徑或萬用字元未匹配到任何檔案）：$PackPath"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($OutFilePath)) {
+        $OutFilePath = Join-Path -Path (Get-Location).Path -ChildPath ($plan.DefaultBaseName + '.txt')
+    }
+    else {
+        $OutFilePath = [System.IO.Path]::GetFullPath($OutFilePath)
+    }
+
+    if ((Test-Path -LiteralPath $OutFilePath) -and -not $ForceOverwrite) {
+        throw "輸出檔案已存在：$OutFilePath（如需覆蓋請加上 -Force）"
+    }
+
+    Write-Host "打包中：共 $($plan.Entries.Count) 個項目..."
+    $zipBytes = New-CtxtZipBytes -Entries $plan.Entries
+    $originalSize = $zipBytes.Length
+
+    Write-Host '壓縮中（Brotli, SmallestSize）...'
+    $compressed = Compress-CtxtBrotli -InputBytes $zipBytes
+    $compressedSize = $compressed.Length
+
+    Write-Host '加密中（AES-256-GCM + RSA-4096-OAEP-SHA256）...'
+    $aes = Protect-CtxtAesGcm -PlainBytes $compressed
+    $wrappedKey = Protect-CtxtAesKey -AesKey $aes.Key -PublicKeyPemText $PublicKeyPem
+    [Array]::Clear($aes.Key, 0, $aes.Key.Length)
+
+    $container = New-CtxtContainer -WrappedKey $wrappedKey -Nonce $aes.Nonce -Tag $aes.Tag -Ciphertext $aes.Ciphertext
+
+    $b64Text = [Convert]::ToBase64String($container, [System.Base64FormattingOptions]::InsertLineBreaks)
+    [System.IO.File]::WriteAllText($OutFilePath, $b64Text, [System.Text.Encoding]::ASCII)
+    $b64Size = (Get-Item -LiteralPath $OutFilePath).Length
+
+    Write-Host ''
+    Write-Host "完成：$OutFilePath"
+    Write-Host ('原始（打包後、壓縮前）: {0:N0} bytes' -f $originalSize)
+    Write-Host ('壓縮後（Brotli）       : {0:N0} bytes' -f $compressedSize)
+    Write-Host ('Base64 後（輸出檔）    : {0:N0} bytes' -f $b64Size)
 }
 
 # ==========================================================================
