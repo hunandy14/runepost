@@ -90,6 +90,9 @@ $ErrorActionPreference = 'Stop'
 try {
     # Import-Module 放在 try 內：模組資料夾遺失／損壞也走同一個乾淨的錯誤出口，
     # 而不是噴出 PowerShell 原生的多行錯誤記錄。
+    # -Force 保留的量測依據見 rune-seal.ps1 同一段註解：全新行程下 -Force 不花錢
+    # （單次執行 1632ms vs 1635ms，差異在雜訊內），但能保證同一 session 改過模組
+    # 檔後跑到的是磁碟版本，而非 no-op 沿用的舊程式碼。
     Import-Module (Join-Path $PSScriptRoot 'RunePost') -Force
 
     switch ($PSCmdlet.ParameterSetName) {
