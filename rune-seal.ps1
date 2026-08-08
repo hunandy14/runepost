@@ -11,6 +11,11 @@
     因此本腳本是與金鑰無關的通用工具，任何人取得後配上自己的 public.pem 即可使用。
     金鑰的產生與管理請在解密端使用 rune-open.ps1。
 
+    加密端只使用收件人公鑰，與解密端私鑰的儲存格式（rune-open.ps1 -GenerateKeys
+    -Protect 的 None／Passphrase／Dpapi）無關，本腳本的用法不因該選擇而改變。
+    密文張貼到公開管道後即為永久存在，而收件人私鑰是唯一的還原手段；請確認收件人
+    已備妥私鑰備份（rune-open.ps1 -ExportPrivateKey），再開始傳送密文。
+
 .EXAMPLE
     .\rune-seal.ps1 C:\data\report.docx
     把收件人的 public.pem 放到本機 ~\.rune\public.pem 後，將單一檔案打包、壓縮、加密

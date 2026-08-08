@@ -15,9 +15,13 @@
             對應的公鑰檔」成立；拿一把備用／次要私鑰導出，若仍寫回預設路徑，
             會靜默覆蓋主金鑰的 public.pem，讓加密端此後預設加密給錯的收件人。
     #>
-    param([string] $KeyFilePath)
+    param(
+        [string] $KeyFilePath,
+        # 私鑰為密碼保護的 PKCS#8 PEM 時所需；未提供則於互動環境詢問。
+        [securestring] $Passphrase
+    )
 
-    $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath
+    $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath -Passphrase $Passphrase
     try {
         $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
         $spkiDer = $ecdh.ExportSubjectPublicKeyInfo()

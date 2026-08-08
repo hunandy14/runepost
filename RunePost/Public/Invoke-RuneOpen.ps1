@@ -6,7 +6,9 @@ function Invoke-RuneOpen {
     param(
         [string] $InFilePath,
         [string] $DestinationPath,
-        [string] $KeyFilePath
+        [string] $KeyFilePath,
+        # 私鑰為密碼保護的 PKCS#8 PEM 時所需；未提供則於互動環境詢問。
+        [securestring] $Passphrase
     )
 
     if (-not (Test-Path -LiteralPath $InFilePath -PathType Leaf)) {
@@ -28,7 +30,7 @@ function Invoke-RuneOpen {
 
     $parsed = ConvertFrom-RuneContainer -Bytes $containerBytes
 
-    $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath
+    $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath -Passphrase $Passphrase
     try {
         $sharedSecret = Get-RuneSharedSecretForDecrypt -EphPubKeyDer $parsed.EphPubKey -OwnPrivateKey $ecdh
     }

@@ -27,7 +27,7 @@
 | 工具產物 | `rune-seal.ps1`(加密端)、`rune-open.ps1`(解密端 + 金鑰管理);未來 `rune-clip.ps1` |
 | 容器 magic | `RUNE`(4 bytes ASCII) |
 | 容器 version | `0x02` |
-| 私鑰檔 | `~\.rune\private.key`(DPAPI CurrentUser 保護) |
+| 私鑰檔 | `~\.rune\private.key`(三種儲存格式共用同一路徑,由內容判別,見 §1.7.7) |
 | 公鑰檔 | `~\.rune\public.pem`(明文 PEM,**執行期讀取,不內嵌**) |
 | 命名前綴 | 常數與函式由 `Ctxt` 改為 `Rune` |
 | 現況起點 | 單檔 `transfer.ps1`,871 行,SHA-256 `1B2301F1…`,分支 `agent/main` @ `9f53082` |
@@ -152,7 +152,7 @@ M0 實測基準:`ephPubKeyLen = 91`,舊格式 `nonce@98 / tag@110`;新格式應�
 
 未來測試案例:T01 CRLF/LF/CR 混用 roundtrip 位元組全等 · T02 尾端空白與連續換行保留 · T03 emoji(BMP 外 surrogate pair)+ CJK + 零寬字元 · T04 空字串行為 · T05 開頭 U+FEFF 不被剝除 · T06 單字元(Brotli 後變大)仍可 roundtrip · T07 1 MB 大文字 · T08 NFC/NFD 兩版本各自正確還原。
 
-### 1.7 公鑰取得與驗證(執行期讀檔)
+### 1.7 金鑰管理(公鑰執行期讀檔、私鑰儲存與匯出)
 
 #### 1.7.1 取消內嵌
 
@@ -238,8 +238,91 @@ M0 實測基準:`ephPubKeyLen = 91`,舊格式 `nonce@98 / tag@110`;新格式應�
 
 存在的必要性:
 - `public.pem` 由 `private.key` **可完全重現**,因此不珍貴、覆寫無風險。
-- 但 `-GenerateKeys` 在 `private.key` 存在時一律拒絕,**若沒有這個模式,使用者一旦刪掉或遺失 `public.pem` 就再也生不回來**。
+- 但 `-GenerateKeys` 只有在明確確認(或帶 `-Force`)後才會動既有私鑰,**若沒有這個模式,使用者一旦刪掉或遺失 `public.pem` 就再也生不回來**。
 - 兼作「再印一次我的指紋」的工具,供隨時與加密端比對。
+
+#### 1.7.7 私鑰儲存格式(`-GenerateKeys -Protect`)
+
+私鑰寫到 `~\.rune\private.key`,靜態保護方式由 `-Protect` 決定,共三種,**預設 `None`**:
+
+| `-Protect` | 落地內容 | 可否備份 | 產生時的輸出 |
+|---|---|---|---|
+| `None`(預設) | 未加密的 PKCS#8 PEM(`ExportPkcs8PrivateKeyPem`),標頭 `-----BEGIN PRIVATE KEY-----` | 可,直接複製 | 摘要 + **未加密警告**(三行,走警告串流) |
+| `Passphrase` | 密碼保護的 PKCS#8 PEM(`ExportEncryptedPkcs8PrivateKeyPem`,PBKDF2-HMAC-SHA256 600000 次 + AES-256-CBC),標頭 `-----BEGIN ENCRYPTED PRIVATE KEY-----` | 可,還原需密碼 | 摘要 |
+| `Dpapi` | DPAPI(CurrentUser,無 entropy)保護的 PKCS#8 位元組 | **否** | 摘要 |
+
+**為什麼預設是 `None`。** 密文張貼到公開管道後即為永久存在,而私鑰是唯一的還原手段
+—— 私鑰遺失等同所有歷來密文永久無法解密。DPAPI 的靜態保護最強,但綁定本機與本
+Windows 帳號,重灌或換帳號後即無法還原,也**無法備份**。此處把可攜性放在靜態加密之前,
+代價是未加密的私鑰檔,因此 `None` 每次產生都必須印出警告:檔案未加密、任何能讀取它的人
+都能解開所有以對應公鑰加密的密文、不要放進雲端同步資料夾或版本控管目錄。
+
+**密碼的取得。** 模組函式與入口腳本皆接受 `[securestring] $Passphrase`;未提供時於互動
+環境以 `Read-Host -AsSecureString` 詢問,並要求輸入兩次比對(密碼打錯即永久無法還原該檔)。
+**非互動環境(`[Console]::IsInputRedirected`)且未提供密碼時一律擲回錯誤、exit 1,不得
+顯示提示** —— 排程工作與以子行程執行本工具的測試都會關閉標準輸入,顯示提示會讓行程
+永不結束。
+
+**取得密碼的時機。** `-GenerateKeys` 必須在任何檔案被改名或寫入**之前**取得密碼:這一步
+會因非互動、兩次輸入不一致或空密碼而失敗,此時既有的 `private.key` / `public.pem` 必須
+維持原狀。
+
+**檔案權限。** 本工具寫出的私鑰檔一律收斂為「檔案擁有者 + `SYSTEM`」兩個帳號的完全控制,
+並以 `SetAccessRuleProtection($true, $false)` 中斷繼承(不把繼承項複製成明確項)。不設定的話
+檔案完全繼承父目錄權限,實測含 `BUILTIN\Administrators`、AppContainer SID 等對象,私鑰放到
+`C:\Temp` 或共用資料夾即他人可讀。三種格式與 `-ExportPrivateKey` 的輸出檔都套用(DPAPI 亦套,
+縱深防禦);`public.pem` 不套,公鑰本來就是要交出去的。目標磁碟不支援 ACL(例如 FAT32)時
+**警告後繼續**,不因權限失敗而讓私鑰寫不出來。
+
+**成功輸出的第一行必須標示保護方式。** 保護方式只出現在警告串流是不夠的——警告串流在輸出
+被重新導向時可能被丟棄,使用者會不知道自己拿到的是不是明文私鑰。`-GenerateKeys` 與
+`-ExportPrivateKey` 一律在成功輸出的第一行、以一般輸出串流標示格式;`None` 的三行警告照舊。
+
+**載入端自動判別格式。** 三種格式共用 `~\.rune\private.key` 這一個路徑,**不依格式分檔名**;
+`Get-RunePrivateKey` 由檔案內容判別(`Get-RunePrivateKeyFormat`):
+
+1. 內容含 `-----BEGIN ENCRYPTED PRIVATE KEY-----` → 密碼保護的 PKCS#8 PEM
+2. 內容含 `-----BEGIN PRIVATE KEY-----` → 未加密的 PKCS#8 PEM
+3. 其餘 → DPAPI 位元組
+
+比對順序必須先 1 後 2:後者的標記是前者的子字串,順序相反會把加密 PEM 誤判為未加密 PEM。
+DPAPI 位元組是二進位,以 UTF-8 解碼後不會命中任何標記。三種格式匯入後一律驗證曲線為 P-256。
+長度為 0 的私鑰檔在判別之前就先擋下並直接報「空檔案」——落進第 3 條會報成 DPAPI 解保護失敗,
+與實情不符。讀進來的檔案位元組在載入結束後歸零(未加密 PEM 時那就是明文私鑰)。
+
+**相容性硬性要求:既有的 DPAPI 私鑰不需任何轉換,必須繼續可用。** DPAPI 的位元組格式與
+`Unprotect(CurrentUser, entropy = null)` 的呼叫方式皆不得改變。
+
+#### 1.7.8 `-ExportPrivateKey` 模式(`rune-open.ps1`)
+
+從既有私鑰匯出成可備份的 PKCS#8 PEM,**來源包含 DPAPI 私鑰** —— 這是把 DPAPI 私鑰離機
+保存的唯一途徑,也是本模式存在的理由。
+
+| 參數 | 規則 |
+|---|---|
+| `-OutFile` | **必填,不給預設值**。輸出路徑若已存在則拒絕,加 `-Force` 才覆蓋(與 `-Pack` 的 `-OutFile` 一致) |
+| `-KeyFile` | 來源私鑰,預設 `~\.rune\private.key`;三種格式皆可作為來源 |
+| `-Protect` | 匯出格式,`None`(預設)或 `Passphrase`。**不支援 `Dpapi`**,明確拒絕並說明:DPAPI 檔案在其他機器或帳號無法還原,不具備份用途 |
+| `-Passphrase` | **來源私鑰**的密碼(來源為加密 PEM 時需要) |
+| `-OutPassphrase` | **匯出檔**的密碼(`-Protect Passphrase` 時需要)。與 `-Passphrase` 分開,因為來源與備份是兩個各自獨立的密碼,共用一個參數無法在非互動環境下同時指定 |
+| `-Force` | 略過確認提示,並允許覆蓋已存在的 `-OutFile` |
+
+**確認提示。** 匯出會把受保護的私鑰寫成一個新的、可攜的檔案,`-Protect None` 產生的檔案
+沒有任何加密保護,是提高私鑰暴露面的動作,因此預設為不繼續。規則與 `-GenerateKeys` 的
+覆蓋確認完全一致:印出來源、輸出路徑與格式 → 預設 `N` → `-Force` 略過 → 非互動且無
+`-Force` 則拒絕。此處**不使用 `ShouldProcess`**;全專案確認機制改用標準寫法是後續獨立
+的一輪,混用兩種風格比統一使用手刻更難維護。
+
+**檢查順序。** 先擋輸出檔已存在(便宜且與確認無關),再顯示確認提示,最後才載入來源私鑰
+與取得匯出密碼。被拒絕時不得產生任何檔案。
+
+**原子寫入。** 先寫 `<out>.tmp-<guid>`、套好 §1.7.7 的權限,成功後才 `Move-Item -Force`
+到正式位置,任何失敗都清掉暫存檔。直接寫目標路徑的話,寫到一半失敗會留下截斷的 PEM——
+截斷的 PKCS#8 前段仍含私鑰純量,而這是備份指令,使用者很可能就此以為備份已完成。
+暫存檔與目標同資料夾,搬移是同磁碟區更名,權限會一併帶過去。
+
+成功輸出:第一行標示匯出格式,其後為來源路徑、輸出路徑、公鑰指紋(與來源相同)、以
+`-KeyFile` 使用該備份的命令;`-Protect None` 另印未加密警告。
 
 ---
 
