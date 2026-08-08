@@ -4,8 +4,9 @@ function Invoke-RuneExportPublicKey {
         從既有私鑰重新導出公鑰。
 
         存在的必要性：public.pem 由 private.key 可完全重現，因此不珍貴、覆寫無風險；
-        但 -GenerateKeys 在私鑰存在時一律拒絕，沒有這個模式的話，使用者一旦刪掉或
-        遺失 public.pem 就再也生不回來。兼作「再印一次我的指紋」的工具。
+        但 -GenerateKeys 只有在明確確認（或帶 -Force）後才會動既有私鑰，沒有這個
+        模式的話，使用者一旦刪掉或遺失 public.pem 就再也生不回來。兼作「再印一次
+        我的指紋」的工具。
 
         輸出路徑跟著私鑰走，不永遠寫死預設位置：
           - 未指定 -KeyFile（即沿用預設 ~\.rune\private.key）→ 寫回預設的
@@ -43,11 +44,9 @@ function Invoke-RuneExportPublicKey {
     }
     [System.IO.File]::WriteAllText($outFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
 
-    Write-Host ''
     if (-not $isDefaultKey) {
         Write-Host "使用了非預設私鑰：$effectiveKeyPath"
         Write-Host "公鑰已寫到同目錄，未動到預設的 $($Script:DefaultPublicKeyFile)。"
-        Write-Host ''
     }
-    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer -PublicKeyFilePath $outFile
+    Write-RuneKeySummary -Title '已重新導出公鑰' -KeyFilePath $effectiveKeyPath -PublicKeyFilePath $outFile -SpkiDer $spkiDer
 }

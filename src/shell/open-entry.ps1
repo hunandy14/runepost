@@ -5,7 +5,7 @@
 try {
     switch ($PSCmdlet.ParameterSetName) {
         'GenerateKeys' {
-            Invoke-RuneGenerateKeys
+            Invoke-RuneGenerateKeys -Force:$Force
         }
         'ExportPublicKey' {
             Invoke-RuneExportPublicKey -KeyFilePath $KeyFile

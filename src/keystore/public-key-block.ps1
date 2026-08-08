@@ -3,23 +3,28 @@
 # 區塊：-GenerateKeys / -ExportPublicKey 主流程
 # ==========================================================================
 
-function Write-RunePublicKeyBlock {
+function Write-RuneKeySummary {
     <#
-        統一的公鑰輸出格式：PEM 全文 + 指紋。兩端要比對的就是這個指紋，所以格式必須一致。
-        -PublicKeyFilePath 由呼叫端明確傳入實際寫入的路徑（而非在這裡假設一定是預設
-        路徑）——-ExportPublicKey 用非預設 -KeyFile 時會寫到私鑰同目錄，不是預設位置。
+        統一的金鑰摘要輸出（-GenerateKeys / -ExportPublicKey 共用）：標題 + 私鑰／
+        公鑰路徑 + 指紋，對齊的三行（有備份時加第四行），刻意不印 PEM 全文——
+        路徑已給，要看內容用 Get-Content；原本較長的備份／遺失警語移到
+        comment-based help（見 shell/open-help.ps1 的 .DESCRIPTION 與 .EXAMPLE）。
     #>
     param(
-        [string] $PublicPem,
+        [string] $Title,
+        [string] $KeyFilePath,
+        [string] $KeyFileNote,
+        [string] $PublicKeyFilePath,
         [byte[]] $SpkiDer,
-        [string] $PublicKeyFilePath
+        [string] $BackupKeyFilePath
     )
-    Write-Host "公鑰已寫入：$PublicKeyFilePath"
-    Write-Host '請把這個檔案（或以下 PEM 全文）交給加密端，放到該機器的 ~\.rune\public.pem。'
-    Write-Host ''
-    Write-Host '===== 公鑰 PEM（加密端使用）====='
-    Write-Host $PublicPem
-    Write-Host '================================'
-    Write-Host ('公鑰指紋：RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $SpkiDer))
-    Write-Host '加密端每次 -Pack 都會印出同格式的指紋，請逐字比對；不符代表公鑰在傳遞過程中被掉包。'
+    Write-Host $Title
+    $keyLine = "  私鑰  $KeyFilePath"
+    if ($KeyFileNote) { $keyLine += "   ($KeyFileNote)" }
+    Write-Host $keyLine
+    Write-Host "  公鑰  $PublicKeyFilePath"
+    Write-Host ('  指紋  RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $SpkiDer))
+    if ($BackupKeyFilePath) {
+        Write-Host "  備份  $BackupKeyFilePath"
+    }
 }

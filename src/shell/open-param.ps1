@@ -1,9 +1,9 @@
 [CmdletBinding(DefaultParameterSetName = 'Unpack')]
 param(
-    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true, Position = 0)]
     [string] $Unpack,
 
-    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true, Position = 1)]
     [string] $Destination,
 
     [Parameter(ParameterSetName = 'Unpack')]
@@ -12,6 +12,9 @@ param(
 
     [Parameter(ParameterSetName = 'GenerateKeys', Mandatory = $true)]
     [switch] $GenerateKeys,
+
+    [Parameter(ParameterSetName = 'GenerateKeys')]
+    [switch] $Force,
 
     [Parameter(ParameterSetName = 'ExportPublicKey', Mandatory = $true)]
     [switch] $ExportPublicKey

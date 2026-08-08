@@ -1,5 +1,5 @@
 ﻿# 本檔由 build.ps1 自 src/ 組裝產生，請勿直接編輯 —— 請改 src/ 後重跑 build.ps1
-# source-digest: bbc9c01226b9
+# source-digest: 450b3ccb9031
 # format: RUNE v2
 # product: rune-open
 # fragments: 20
@@ -13,29 +13,62 @@
     解壓（Brotli）→ 解包（ZIP/store）。純 .NET 內建類別實作，零外部依賴，全程記憶體操作。
 
     私鑰以 DPAPI（CurrentUser）保護後存於 ~\.rune\private.key，只有「同一台機器、
-    同一個 Windows 帳號」解得開。公鑰同時寫到 ~\.rune\public.pem，交給加密端
-    （rune-seal.ps1）使用。
+    同一個 Windows 帳號」解得開；換機器或換帳號一律讀不開，且不支援另外設密碼。
+    請自行額外備份此檔——若檔案本身遺失或損壞（而非被 -GenerateKeys 改名保留，
+    見下段），所有用對應公鑰加密過的密文將永久無法解密，沒有任何復原手段。
+    公鑰同時寫到 ~\.rune\public.pem，請把這個檔案交給加密端（rune-seal.ps1），
+    放到該機器的 ~\.rune\public.pem（或用 -PublicKey 指定其他路徑／直接傳入
+    PEM 字串本體）。
+
+    -GenerateKeys 若偵測到 ~\.rune\private.key 已存在，不會直接覆蓋：互動環境下
+    會先印出現有金鑰的指紋，提示是否要產生新金鑰（預設為「不繼續」，直接 Enter
+    或輸入 y/yes 以外的任何內容都會取消）；一旦確認（或帶 -Force 跳過提示），
+    會先把舊的 private.key／public.pem 改名為同一時間戳的 .bak 檔（不是刪除），
+    才產生並寫入新金鑰對。舊私鑰仍在，只是換了副檔名，用 -KeyFile 指向備份路徑
+    即可繼續解密用舊公鑰加密的密文；但比對指紋仍然重要——確認要換的是哪一把，
+    因為換過之後加密端預設用的公鑰就不同了。非互動環境（例如排程工作、管道輸入
+    被重導向）一律直接拒絕，不會卡在提示；此時請改用 -Force，或手動處理
+    private.key 後重新執行。
+
+    成功輸出只印路徑與指紋，不再印出公鑰 PEM 全文；要看 PEM 內容請自行執行
+    Get-Content ~\.rune\public.pem。
+
+.PARAMETER Force
+    搭配 -GenerateKeys：當 ~\.rune\private.key 已存在時，略過確認提示直接產生
+    新金鑰（舊金鑰仍會改名保留為 .bak 檔，不會刪除），供非互動情境（腳本、
+    排程）使用。
 
 .EXAMPLE
     .\rune-open.ps1 -GenerateKeys
-    產生 ECDH P-256 金鑰對：私鑰以 DPAPI 保護後存到 ~\.rune\private.key，公鑰同時寫到
-    ~\.rune\public.pem，並在畫面印出公鑰 PEM 與公鑰指紋。
+    產生 ECDH P-256 金鑰對：私鑰以 DPAPI 保護後存到 ~\.rune\private.key，公鑰同時
+    寫到 ~\.rune\public.pem，畫面印出兩者路徑與公鑰指紋。若 private.key 已存在，
+    會先印出現有指紋並詢問是否繼續（預設不繼續）；確認後舊金鑰會改名保留為
+    private.key.bak-<時間戳>（與對應的 public.pem.bak-<時間戳>），舊密文仍可用
+    -KeyFile 指向備份路徑解密。
+
+.EXAMPLE
+    .\rune-open.ps1 -GenerateKeys -Force
+    略過確認提示，直接產生新金鑰；既有的 private.key / public.pem 一樣改名保留為
+    .bak 檔，不會刪除。供非互動環境使用（stdin 被重導向時必須加此參數，否則會
+    直接被拒絕，不會卡住）。
 
 .EXAMPLE
     .\rune-open.ps1 -ExportPublicKey
-    從既有的 ~\.rune\private.key 重新導出公鑰，覆寫 ~\.rune\public.pem 並印出指紋。
-    public.pem 遺失時用這個補回來，也可以拿來隨時再看一次自己的指紋。
+    從既有的 ~\.rune\private.key 重新導出公鑰，覆寫 ~\.rune\public.pem 並印出
+    路徑與指紋。public.pem 遺失時用這個補回來，也可以拿來隨時再看一次自己的指紋。
 
 .EXAMPLE
     .\rune-open.ps1 -Unpack report.docx.txt -Destination C:\out
-    在持有私鑰的機器上解密還原檔案。
+    在持有私鑰的機器上解密還原檔案。-Unpack 與 -Destination 皆可省略參數名稱、
+    依序放位置（.\rune-open.ps1 report.docx.txt C:\out），與 rune-seal.ps1 的
+    .\rune-seal.ps1 <路徑> 用法一致。
 #>
 [CmdletBinding(DefaultParameterSetName = 'Unpack')]
 param(
-    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true, Position = 0)]
     [string] $Unpack,
 
-    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true)]
+    [Parameter(ParameterSetName = 'Unpack', Mandatory = $true, Position = 1)]
     [string] $Destination,
 
     [Parameter(ParameterSetName = 'Unpack')]
@@ -44,6 +77,9 @@ param(
 
     [Parameter(ParameterSetName = 'GenerateKeys', Mandatory = $true)]
     [switch] $GenerateKeys,
+
+    [Parameter(ParameterSetName = 'GenerateKeys')]
+    [switch] $Force,
 
     [Parameter(ParameterSetName = 'ExportPublicKey', Mandatory = $true)]
     [switch] $ExportPublicKey
@@ -589,31 +625,145 @@ function Invoke-RuneOpen {
 # 區塊：-GenerateKeys / -ExportPublicKey 主流程
 # ==========================================================================
 
-function Write-RunePublicKeyBlock {
+function Write-RuneKeySummary {
     <#
-        統一的公鑰輸出格式：PEM 全文 + 指紋。兩端要比對的就是這個指紋，所以格式必須一致。
-        -PublicKeyFilePath 由呼叫端明確傳入實際寫入的路徑（而非在這裡假設一定是預設
-        路徑）——-ExportPublicKey 用非預設 -KeyFile 時會寫到私鑰同目錄，不是預設位置。
+        統一的金鑰摘要輸出（-GenerateKeys / -ExportPublicKey 共用）：標題 + 私鑰／
+        公鑰路徑 + 指紋，對齊的三行（有備份時加第四行），刻意不印 PEM 全文——
+        路徑已給，要看內容用 Get-Content；原本較長的備份／遺失警語移到
+        comment-based help（見 shell/open-help.ps1 的 .DESCRIPTION 與 .EXAMPLE）。
     #>
     param(
-        [string] $PublicPem,
+        [string] $Title,
+        [string] $KeyFilePath,
+        [string] $KeyFileNote,
+        [string] $PublicKeyFilePath,
         [byte[]] $SpkiDer,
-        [string] $PublicKeyFilePath
+        [string] $BackupKeyFilePath
     )
-    Write-Host "公鑰已寫入：$PublicKeyFilePath"
-    Write-Host '請把這個檔案（或以下 PEM 全文）交給加密端，放到該機器的 ~\.rune\public.pem。'
-    Write-Host ''
-    Write-Host '===== 公鑰 PEM（加密端使用）====='
-    Write-Host $PublicPem
-    Write-Host '================================'
-    Write-Host ('公鑰指紋：RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $SpkiDer))
-    Write-Host '加密端每次 -Pack 都會印出同格式的指紋，請逐字比對；不符代表公鑰在傳遞過程中被掉包。'
+    Write-Host $Title
+    $keyLine = "  私鑰  $KeyFilePath"
+    if ($KeyFileNote) { $keyLine += "   ($KeyFileNote)" }
+    Write-Host $keyLine
+    Write-Host "  公鑰  $PublicKeyFilePath"
+    Write-Host ('  指紋  RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $SpkiDer))
+    if ($BackupKeyFilePath) {
+        Write-Host "  備份  $BackupKeyFilePath"
+    }
+}
+
+function Get-RuneKeyBackupPaths {
+    <#
+        算出「這次要保留舊金鑰」該用的備份路徑：private.key 與 public.pem（若存在）
+        用同一個時間戳改名，格式 <原檔名>.bak-yyyyMMdd-HHmmss —— 不會碰撞（同一秒內
+        重複執行時退避加 4 碼亂數尾碼）、可排序、一眼看得出是備份。
+    #>
+    param()
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $keyBackup = '{0}.bak-{1}' -f $Script:DefaultKeyFile, $stamp
+    $pubBackup = '{0}.bak-{1}' -f $Script:DefaultPublicKeyFile, $stamp
+    if ((Test-Path -LiteralPath $keyBackup) -or (Test-Path -LiteralPath $pubBackup)) {
+        $stamp = '{0}-{1}' -f $stamp, ([guid]::NewGuid().ToString('N').Substring(0, 4))
+        $keyBackup = '{0}.bak-{1}' -f $Script:DefaultKeyFile, $stamp
+        $pubBackup = '{0}.bak-{1}' -f $Script:DefaultPublicKeyFile, $stamp
+    }
+    return [pscustomobject]@{ KeyBackup = $keyBackup; PubBackup = $pubBackup }
+}
+
+function Move-RuneExistingKeyFilesToBackup {
+    <#
+        實際執行改名（不是刪除）：private.key -> KeyBackupPath（呼叫前必須已確認
+        存在）；public.pem -> PubBackupPath（若存在才搬，不存在不算錯誤）。
+        任一步失敗就整個中止：若私鑰改名成功但公鑰改名失敗，會先把私鑰名稱搬回
+        原位再往外拋例外，不留下「舊檔已搬走但覆蓋沒有真的發生」的半套狀態。
+    #>
+    param([string] $KeyBackupPath, [string] $PubBackupPath)
+
+    try {
+        Rename-Item -LiteralPath $Script:DefaultKeyFile -NewName (Split-Path -Leaf $KeyBackupPath) -ErrorAction Stop
+    }
+    catch {
+        throw "備份既有私鑰檔失敗，未產生新金鑰：$($_.Exception.Message)"
+    }
+
+    if (Test-Path -LiteralPath $Script:DefaultPublicKeyFile) {
+        try {
+            Rename-Item -LiteralPath $Script:DefaultPublicKeyFile -NewName (Split-Path -Leaf $PubBackupPath) -ErrorAction Stop
+        }
+        catch {
+            Rename-Item -LiteralPath $KeyBackupPath -NewName (Split-Path -Leaf $Script:DefaultKeyFile) -ErrorAction SilentlyContinue
+            throw "備份既有公鑰檔失敗，已還原私鑰檔案，未產生新金鑰：$($_.Exception.Message)"
+        }
+    }
+}
+
+function Get-RuneExistingKeyFingerprint {
+    <#
+        供覆蓋提示使用：嘗試讀出既有私鑰、算出對應公鑰指紋。私鑰讀不出來（DPAPI
+        解不開／檔案損壞）時回傳 $null，呼叫端顯示「無法讀取」，不得讓提示流程
+        因此崩潰——使用者仍應看到確認提示，只是少了指紋這項參考資訊。
+    #>
+    param([string] $KeyFilePath)
+    try {
+        $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath
+        try {
+            $spkiDer = $ecdh.ExportSubjectPublicKeyInfo()
+            return ('RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $spkiDer))
+        }
+        finally {
+            $ecdh.Dispose()
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Confirm-RuneKeyOverwrite {
+    <#
+        私鑰已存在時，是否可以繼續產生新金鑰（仿 ssh-keygen 的互動提示）。規則：
+          - -Force：略過提示，直接允許繼續（供非互動使用；舊金鑰仍會改名保留，
+            由呼叫端處理，這裡只負責「准不准繼續」）。
+          - 非互動環境（stdin 被重導向）且未帶 -Force：一律拒絕，不得卡在等輸入
+            —— tests/verify.ps1 用子行程跑腳本並關閉 stdin，卡住會讓整套測試掛死。
+          - 互動環境：印出現有指紋（讀不出來則顯示「無法讀取」，不得因此崩潰）、
+            備份後的檔名、以及「舊密文仍可用 -KeyFile 指向備份路徑解密」這條救援
+            路徑，再讀一行輸入；只有 y / yes（不分大小寫）視為同意，其餘（含直接
+            Enter）一律視為取消。
+        回傳 $true 表示可以繼續，$false 表示使用者取消（呼叫端應正常結束，不視為錯誤）。
+    #>
+    param([switch] $Force, [pscustomobject] $BackupPlan)
+
+    if ($Force) { return $true }
+
+    if ([Console]::IsInputRedirected) {
+        throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n非互動環境無法提示確認，請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"
+    }
+
+    $existingFp = Get-RuneExistingKeyFingerprint -KeyFilePath $Script:DefaultKeyFile
+    if (-not $existingFp) { $existingFp = '無法讀取' }
+
+    Write-Host "$($Script:DefaultKeyFile) 已存在"
+    Write-Host "  現有指紋  $existingFp"
+    Write-Host "繼續會產生新金鑰，舊金鑰改名保留為 $($BackupPlan.KeyBackup)"
+    Write-Host "舊密文仍可解：rune-open.ps1 -Unpack <檔> -Destination <夾> -KeyFile $($BackupPlan.KeyBackup)"
+    [Console]::Write('繼續？ (y/N): ')
+    $answer = [Console]::ReadLine()
+    if ($null -eq $answer) { $answer = '' }
+    return ($answer.Trim() -match '^(?i:y|yes)$')
 }
 
 function Invoke-RuneGenerateKeys {
-    # 私鑰已存在一律拒絕：覆蓋私鑰會讓已加密的舊檔案永久無法解密，這條資料遺失防護不變。
-    if (Test-Path -LiteralPath $Script:DefaultKeyFile) {
-        throw "私鑰檔案已存在，為避免覆蓋既有金鑰（可能導致已加密的舊檔案永久無法解密），已拒絕操作：$($Script:DefaultKeyFile)`n如確定要產生新金鑰，請先手動備份／移除該檔案後再重新執行。"
+    param([switch] $Force)
+
+    $keyExists = Test-Path -LiteralPath $Script:DefaultKeyFile
+    $backupPlan = $null
+    if ($keyExists) {
+        $backupPlan = Get-RuneKeyBackupPaths
+        if (-not (Confirm-RuneKeyOverwrite -Force:$Force -BackupPlan $backupPlan)) {
+            Write-Host '已取消，未變更任何檔案。'
+            return
+        }
+        Move-RuneExistingKeyFilesToBackup -KeyBackupPath $backupPlan.KeyBackup -PubBackupPath $backupPlan.PubBackup
     }
     # 私鑰不存在但 public.pem 還在：直接覆蓋。孤兒 public.pem（私鑰已遺失）比沒有檔案
     # 更危險——加密端會持續加密給一把沒人持有的金鑰，產出永久無法解讀的密文。
@@ -622,7 +772,6 @@ function Invoke-RuneGenerateKeys {
         New-Item -ItemType Directory -Path $Script:DefaultKeyDir -Force | Out-Null
     }
 
-    Write-Host '產生 ECDH P-256 金鑰對中，請稍候...'
     $ecdh = New-RuneEcdhKeyPair
     $pkcs8Bytes = $null
     try {
@@ -634,8 +783,8 @@ function Invoke-RuneGenerateKeys {
         # 可用 -ExportPublicKey 補救；反序則會留下一把沒有對應私鑰的公鑰。
         [System.IO.File]::WriteAllBytes($Script:DefaultKeyFile, $protectedBytes)
 
-        $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
         $spkiDer = $ecdh.ExportSubjectPublicKeyInfo()
+        $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
         [System.IO.File]::WriteAllText($Script:DefaultPublicKeyFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
     }
     finally {
@@ -645,12 +794,15 @@ function Invoke-RuneGenerateKeys {
         $ecdh.Dispose()
     }
 
-    Write-Host ''
-    Write-Host "私鑰已寫入（DPAPI CurrentUser 保護）：$($Script:DefaultKeyFile)"
-    Write-Host '此檔案只有在這台機器、這個 Windows 帳號下才解得開；請自行備份，'
-    Write-Host '遺失或搬到別的機器／帳號，將無法解密任何已用對應公鑰加密的檔案。'
-    Write-Host ''
-    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer -PublicKeyFilePath $Script:DefaultPublicKeyFile
+    if ($backupPlan) {
+        Write-RuneKeySummary -Title '已產生 ECDH P-256 金鑰對' -KeyFilePath $Script:DefaultKeyFile `
+            -KeyFileNote 'DPAPI，僅本機本帳號可解' -PublicKeyFilePath $Script:DefaultPublicKeyFile `
+            -SpkiDer $spkiDer -BackupKeyFilePath $backupPlan.KeyBackup
+    }
+    else {
+        Write-RuneKeySummary -Title '已產生 ECDH P-256 金鑰對' -KeyFilePath $Script:DefaultKeyFile `
+            -KeyFileNote 'DPAPI，僅本機本帳號可解' -PublicKeyFilePath $Script:DefaultPublicKeyFile -SpkiDer $spkiDer
+    }
 }
 
 function Invoke-RuneExportPublicKey {
@@ -658,8 +810,9 @@ function Invoke-RuneExportPublicKey {
         從既有私鑰重新導出公鑰。
 
         存在的必要性：public.pem 由 private.key 可完全重現，因此不珍貴、覆寫無風險；
-        但 -GenerateKeys 在私鑰存在時一律拒絕，沒有這個模式的話，使用者一旦刪掉或
-        遺失 public.pem 就再也生不回來。兼作「再印一次我的指紋」的工具。
+        但 -GenerateKeys 只有在明確確認（或帶 -Force）後才會動既有私鑰，沒有這個
+        模式的話，使用者一旦刪掉或遺失 public.pem 就再也生不回來。兼作「再印一次
+        我的指紋」的工具。
 
         輸出路徑跟著私鑰走，不永遠寫死預設位置：
           - 未指定 -KeyFile（即沿用預設 ~\.rune\private.key）→ 寫回預設的
@@ -697,13 +850,11 @@ function Invoke-RuneExportPublicKey {
     }
     [System.IO.File]::WriteAllText($outFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
 
-    Write-Host ''
     if (-not $isDefaultKey) {
         Write-Host "使用了非預設私鑰：$effectiveKeyPath"
         Write-Host "公鑰已寫到同目錄，未動到預設的 $($Script:DefaultPublicKeyFile)。"
-        Write-Host ''
     }
-    Write-RunePublicKeyBlock -PublicPem $publicPem -SpkiDer $spkiDer -PublicKeyFilePath $outFile
+    Write-RuneKeySummary -Title '已重新導出公鑰' -KeyFilePath $effectiveKeyPath -PublicKeyFilePath $outFile -SpkiDer $spkiDer
 }
 # ==========================================================================
 # 進入點
@@ -712,7 +863,7 @@ function Invoke-RuneExportPublicKey {
 try {
     switch ($PSCmdlet.ParameterSetName) {
         'GenerateKeys' {
-            Invoke-RuneGenerateKeys
+            Invoke-RuneGenerateKeys -Force:$Force
         }
         'ExportPublicKey' {
             Invoke-RuneExportPublicKey -KeyFilePath $KeyFile
