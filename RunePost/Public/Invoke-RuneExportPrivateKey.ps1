@@ -71,11 +71,26 @@ function Invoke-RuneExportPrivateKey {
         $ecdh.Dispose()
     }
 
-    [System.IO.File]::WriteAllText($outFull, $privatePem, [System.Text.UTF8Encoding]::new($false))
+    # 先寫暫存檔、套好權限，成功後才搬到正式位置。直接寫入目標路徑的話，寫到一半
+    # 失敗會留下被截斷的 PEM——而截斷的 PKCS#8 前段仍含私鑰純量，且這是備份指令，
+    # 使用者很可能就此以為備份已經完成。暫存檔與目標同資料夾，搬移是同磁碟區的
+    # 更名，權限設定會一併帶過去。
+    $tmpPath = $outFull + '.tmp-' + [Guid]::NewGuid().ToString('N')
+    try {
+        [System.IO.File]::WriteAllText($tmpPath, $privatePem, [System.Text.UTF8Encoding]::new($false))
+        Set-RunePrivateKeyAcl -Path $tmpPath
+        Move-Item -LiteralPath $tmpPath -Destination $outFull -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $tmpPath) {
+            Remove-Item -LiteralPath $tmpPath -Force
+        }
+    }
 
-    Write-Host '已匯出私鑰'
+    # 匯出格式放在第一行、走一般輸出串流，理由同 -GenerateKeys 的成功摘要。
+    Write-Host "已匯出私鑰（格式：$(Get-RunePrivateKeyProtectNote -Protect $Protect)）"
     Write-Host "  來源  $sourcePath"
-    Write-Host "  輸出  $outFull   ($(Get-RunePrivateKeyProtectNote -Protect $Protect))"
+    Write-Host "  輸出  $outFull"
     Write-Host ('  指紋  RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $spkiDer))
     Write-Host "還原方式：rune-open.ps1 -Unpack <密文檔> -Destination <目的資料夾> -KeyFile $outFull"
 

@@ -37,6 +37,9 @@ function Get-RunePrivateKey {
     }
 
     $fileBytes = [System.IO.File]::ReadAllBytes($KeyFilePath)
+    if ($fileBytes.Length -eq 0) {
+        throw "私鑰檔案讀取失敗：$KeyFilePath 是空檔案（0 位元組），沒有任何金鑰內容可讀"
+    }
     $format = Get-RunePrivateKeyFormat -Content $fileBytes
 
     $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
@@ -97,6 +100,12 @@ function Get-RunePrivateKey {
     catch {
         $ecdh.Dispose()
         throw
+    }
+    finally {
+        # 未加密 PEM 格式時，$fileBytes 就是明文私鑰的位元組，用完即歸零；DPAPI 與
+        # 加密 PEM 的內容雖然本身受保護，仍一併清除，讓「私鑰檔內容」只有一種處置方式。
+        # 由 $fileBytes 解出的 $pem 字串是不可變的 System.String，結構上無法清零。
+        [Array]::Clear($fileBytes, 0, $fileBytes.Length)
     }
 
     return $ecdh

@@ -60,6 +60,7 @@ function Invoke-RuneGenerateKeys {
             $privatePem = Export-RunePrivateKeyPem -Ecdh $ecdh -Protect $Protect -Passphrase $keyPassphrase
             [System.IO.File]::WriteAllText($Script:DefaultKeyFile, $privatePem, [System.Text.UTF8Encoding]::new($false))
         }
+        Set-RunePrivateKeyAcl -Path $Script:DefaultKeyFile
 
         $spkiDer = $ecdh.ExportSubjectPublicKeyInfo()
         $publicPem = $ecdh.ExportSubjectPublicKeyInfoPem()
@@ -72,14 +73,17 @@ function Invoke-RuneGenerateKeys {
         $ecdh.Dispose()
     }
 
+    # 保護方式寫進標題，也就是成功輸出的第一行，且走一般輸出串流：警告串流在輸出被
+    # 重新導向時可能被丟棄，使用者不該因此不知道自己手上這把私鑰是不是明文。
     $keyNote = Get-RunePrivateKeyProtectNote -Protect $Protect
+    $title = "已產生 ECDH P-256 金鑰對（私鑰保護方式：$keyNote）"
     if ($backupPlan) {
-        Write-RuneKeySummary -Title '已產生 ECDH P-256 金鑰對' -KeyFilePath $Script:DefaultKeyFile `
+        Write-RuneKeySummary -Title $title -KeyFilePath $Script:DefaultKeyFile `
             -KeyFileNote $keyNote -PublicKeyFilePath $Script:DefaultPublicKeyFile `
             -SpkiDer $spkiDer -BackupKeyFilePath $backupPlan.KeyBackup
     }
     else {
-        Write-RuneKeySummary -Title '已產生 ECDH P-256 金鑰對' -KeyFilePath $Script:DefaultKeyFile `
+        Write-RuneKeySummary -Title $title -KeyFilePath $Script:DefaultKeyFile `
             -KeyFileNote $keyNote -PublicKeyFilePath $Script:DefaultPublicKeyFile -SpkiDer $spkiDer
     }
 

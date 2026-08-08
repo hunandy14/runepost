@@ -48,6 +48,8 @@ function Read-RunePassphrase {
         $a = ConvertFrom-RuneSecureString -Secure $first
         $b = ConvertFrom-RuneSecureString -Secure $second
         $same = [string]::Equals($a, $b, [System.StringComparison]::Ordinal)
+        # 比對結束就放掉這兩份明文，不讓它們活到函式結束
+        $a = $null; $b = $null
         if (-not $same) {
             throw '私鑰密碼無效：兩次輸入的密碼不一致，未變更任何檔案。'
         }

@@ -929,6 +929,9 @@ function Invoke-VerifyTrack {
     $script:LegacyDpapiKey = $null
     $script:ExportedPlainKey = $null
     $script:ExportedEncKey = $null
+    $script:KeyProtNone = $null
+    $script:KeyProtDpapi = $null
+    $script:ExportPlainOut = $null
 
     # 密碼保護案例共用的密碼。含空白、非 ASCII 與符號，順帶涵蓋 SecureString 經
     # 環境變數傳入子行程後仍逐字相符（密碼錯一個字元就解不開，等於同時是編碼測試）。
@@ -2384,6 +2387,7 @@ Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef
         $r = Invoke-KeyRoundtrip -Key $kp -Name 'pnone' -Source $src
         $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $r.Dest) -AllowRootPrefix 'tree'
         Assert ($null -eq $cmp.Diff) $cmp.Diff
+        $script:KeyProtNone = $kp
         return ('標頭 -----BEGIN PRIVATE KEY-----、可獨立以 ImportFromPem 載入、與 public.pem 同一把；警告已印出；{0} 檔位元一致還原' -f (Get-TreeMap $src).Count)
     }
 
@@ -2407,6 +2411,7 @@ Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef
         $r = Invoke-KeyRoundtrip -Key $kp -Name 'pdpapi' -Source $src
         $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $r.Dest) -AllowRootPrefix 'tree'
         Assert ($null -eq $cmp.Diff) $cmp.Diff
+        $script:KeyProtDpapi = $kp
         return ('{0}B 二進位、可用 DPAPI(CurrentUser) 解開、無 PEM 標頭、無未加密警告；{1} 檔位元一致還原' -f $b.Length, (Get-TreeMap $src).Count)
     }
 
@@ -2593,6 +2598,7 @@ catch {
         Assert ($null -eq $cmp.Diff) $cmp.Diff
 
         $script:ExportedPlainKey = $outKey
+        $script:ExportPlainOut = $r.StdOut
         return ('DPAPI 私鑰 → 未加密 PKCS#8 PEM（{0}B），指紋 RUNE-KEY {1} 不變，且可解開匯出前產生的密文（3 檔位元一致）' -f `
             (Get-Item -LiteralPath $outKey).Length, $expectFp)
     }
@@ -2707,6 +2713,102 @@ Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DEST -KeyFil
         Assert ($r.StdErr -match '-Force') ('未指引可用 -Force：' + (Squash $r.StdErr 200))
         Assert (-not [System.IO.File]::Exists($outKey)) '被拒絕卻仍產生了匯出檔'
         return ("$ev；未產生任何檔案")
+    }
+
+    Invoke-TCase 'C80' '私鑰檔權限：中斷繼承且只剩擁有者與 SYSTEM（三種格式與匯出檔皆然）' {
+        Assert ($null -ne $script:KeyProtNone -and $null -ne $script:KeyProtDpapi) '前置 C69／C70 未產生金鑰'
+        Assert ($null -ne $script:KeyPassSandbox) '前置 C71 未產生金鑰'
+        Assert ($null -ne $script:ExportedPlainKey -and $null -ne $script:ExportedEncKey) '前置 C75／C76 未產生匯出檔'
+
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $allowed = @($me, 'S-1-5-18')
+        $targets = @(
+            @{ N = '-GenerateKeys None'; P = $script:KeyProtNone.KeyPath }
+            @{ N = '-GenerateKeys Dpapi'; P = $script:KeyProtDpapi.KeyPath }
+            @{ N = '-GenerateKeys Passphrase'; P = $script:KeyPassSandbox.KeyPath }
+            @{ N = '-ExportPrivateKey None'; P = $script:ExportedPlainKey }
+            @{ N = '-ExportPrivateKey Passphrase'; P = $script:ExportedEncKey }
+        )
+        $seen = @()
+        foreach ($t in $targets) {
+            $acl = Get-Acl -LiteralPath $t.P
+            Assert ($acl.AreAccessRulesProtected) ('{0}：權限仍繼承自父資料夾（未中斷繼承）' -f $t.N)
+            foreach ($rule in $acl.Access) {
+                $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+                $who = $rule.IdentityReference.Value
+                Assert ($allowed -contains $sid) ('{0}：出現不該有的授權對象 {1}（{2}）' -f $t.N, $who, $sid)
+                Assert (-not $rule.IsInherited) ('{0}：{1} 是繼承而來的項目' -f $t.N, $who)
+                $seen += $who
+            }
+        }
+        # 反面對照：公鑰不該被收斂（公鑰本來就是要交出去的），否則等於這條斷言測不出東西
+        $pubAcl = Get-Acl -LiteralPath $script:KeyProtNone.Sandbox.PubPath
+        Assert (-not $pubAcl.AreAccessRulesProtected) 'public.pem 也被中斷繼承了，收斂範圍不該擴及公鑰'
+        $pubHas = @($pubAcl.Access | Where-Object { $_.IdentityReference.Value -match 'Administrators|BUILTIN' }).Count
+        return ('5 個私鑰檔皆中斷繼承、授權對象僅 {0}；同資料夾的 public.pem 仍為繼承（含 BUILTIN 項目 {1} 筆），證明收斂確有作用且未擴及公鑰' -f `
+            (($seen | Sort-Object -Unique) -join ' / '), $pubHas)
+    }
+
+    Invoke-TCase 'C81' '私鑰保護方式標示在成功輸出的第一行，且走一般輸出串流' {
+        Assert ($null -ne $script:KeyProtNone -and $null -ne $script:KeyProtDpapi) '前置 C69／C70 未產生金鑰'
+        Assert ($null -ne $script:ExportPlainOut) '前置 C75 未記錄匯出輸出'
+        $checks = @(
+            @{ N = '-GenerateKeys None'; O = $script:KeyProtNone.Result.StdOut; E = '未加密的 PKCS#8 PEM' }
+            @{ N = '-GenerateKeys Dpapi'; O = $script:KeyProtDpapi.Result.StdOut; E = 'DPAPI' }
+            @{ N = '-ExportPrivateKey None'; O = $script:ExportPlainOut; E = '未加密的 PKCS#8 PEM' }
+        )
+        $lines = @()
+        foreach ($c in $checks) {
+            $first = @(($c.O -split "`r?`n") | Where-Object { $_.Trim().Length -gt 0 })[0]
+            Assert ($null -ne $first) ('{0}：沒有任何輸出' -f $c.N)
+            Assert ($first -notmatch '^\s*WARNING:') ('{0}：第一行是警告串流的內容，格式標示不該只靠警告：{1}' -f $c.N, (Squash $first 120))
+            Assert ($first -match [regex]::Escape($c.E)) ('{0}：第一行未標示保護方式（應含「{1}」）：{2}' -f $c.N, $c.E, (Squash $first 120))
+            $lines += (Squash $first 60)
+        }
+        # 標示必須在 stdout，不能只在 stderr（重導向時 stderr 常被丟棄或另存）
+        Assert ([string]::IsNullOrWhiteSpace($script:KeyProtNone.Result.StdErr)) '成功路徑不該有 stderr 輸出'
+        return ('三處成功輸出的第一行皆標示保護方式且非 WARNING 行：' + ($lines -join ' ｜ '))
+    }
+
+    Invoke-TCase 'C82' '-ExportPrivateKey 原子寫入：正常路徑不留 .tmp-* 殘留' {
+        $dir = New-Dir (Join-Path $script:Work 'keybackup_atomic')
+        Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        $outKey = Join-Path $dir 'atomic.pem'
+
+        # 連續匯出兩次（第二次走 -Force 覆蓋路徑），兩次都不得留下暫存檔
+        foreach ($pass in @(1, 2)) {
+            $a = @('-ExportPrivateKey', '-OutFile', $outKey, '-KeyFile', $script:KeyA.KeyPath, '-Force')
+            [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen -Arguments $a -EnvVars $script:KeyA.Sandbox.Env) `
+                ("-ExportPrivateKey 第 $pass 次"))
+        }
+        $files = @([System.IO.Directory]::EnumerateFiles($dir))
+        $tmp = @($files | Where-Object { (Split-Path -Leaf $_) -like '*.tmp-*' })
+        Assert ($tmp.Count -eq 0) ('留下暫存檔：' + (($tmp | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
+        Assert ($files.Count -eq 1) ('輸出資料夾應只有 1 個檔案，實得 {0}：{1}' -f $files.Count, (($files | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
+        $text = [System.IO.File]::ReadAllText($outKey)
+        Assert ($text -match '-----BEGIN PRIVATE KEY-----' -and $text -match '-----END PRIVATE KEY-----') `
+            '匯出檔不是完整的 PEM（頭尾標記不齊，疑似截斷）'
+        $ind = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $ind.ImportFromPem($text)
+        Assert ([Convert]::ToHexString($ind.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) '匯出檔內容不是金鑰 A'
+        return ('連續匯出 2 次（含 -Force 覆蓋），資料夾只剩 1 個完整可載入的 PEM，無 .tmp-* 殘留')
+    }
+
+    Invoke-TCase 'C83' '空的私鑰檔：直接報「空檔案」，不繞成 DPAPI 解保護失敗' {
+        $emptyKey = Join-Path (New-Dir (Join-Path $script:Work 'emptykey')) 'private.key'
+        [System.IO.File]::WriteAllBytes($emptyKey, [byte[]]@())
+        Assert ((Get-Item -LiteralPath $emptyKey).Length -eq 0) '前置：測試檔不是 0 位元組'
+        $dest = New-Dir (Join-Path $script:Work 'unpack\emptykey')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $emptyKey) `
+            -EnvVars $script:KeyA.Sandbox.Env -Timeout 45
+        $ev = Expect-Failure $r 'key' '空的私鑰檔'
+        Assert ($r.StdErr -match '空') ('訊息未指出檔案是空的：' + (Squash $r.StdErr 200))
+        Assert ($r.StdErr -notmatch 'DPAPI') ('空檔案被誤報成 DPAPI 解保護失敗：' + (Squash $r.StdErr 200))
+        Assert ((Get-TreeMap $dest).Count -eq 0) '失敗卻仍寫出檔案'
+        return ("$ev；訊息點名空檔案且未提及 DPAPI")
     }
 
     Invoke-TCase 'C40' '原始受測腳本（seal + open）自始至終未被修改' {
