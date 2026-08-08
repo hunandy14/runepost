@@ -10,6 +10,7 @@ function New-RuneKeyPair {
                       傳入時於互動環境詢問。
           Dpapi       DPAPI（CurrentUser）位元組。僅本機本帳號可解，無法備份。
     #>
+    [CmdletBinding()]
     param(
         [ValidateSet('None', 'Passphrase', 'Dpapi')]
         [string] $Protect = 'None',

@@ -3,6 +3,7 @@
 # ==========================================================================
 
 function Invoke-RuneSeal {
+    [CmdletBinding()]
     param(
         [string] $PackPath,
         [string] $OutFilePath,

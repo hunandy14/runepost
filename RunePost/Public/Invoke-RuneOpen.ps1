@@ -3,6 +3,7 @@
 # ==========================================================================
 
 function Invoke-RuneOpen {
+    [CmdletBinding()]
     param(
         [string] $InFilePath,
         [string] $DestinationPath,

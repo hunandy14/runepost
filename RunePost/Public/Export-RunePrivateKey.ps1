@@ -17,6 +17,7 @@ function Export-RunePrivateKey {
                          也才能在非互動環境下同時指定。
           -Force         略過確認提示，並允許覆蓋已存在的 -OutFilePath。
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string] $OutFilePath,
