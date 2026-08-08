@@ -5,12 +5,17 @@
 
 .DESCRIPTION
     本腳本只依據凍結規格撰寫，未讀取任何受測實作原始碼。
-    對 dist\rune-seal.ps1（加密端）與 dist\rune-open.ps1（解密端 + 金鑰管理）
-    兩個產物跑一套完整案例；-Pack 相關案例一律對 rune-seal.ps1 執行，
+    對 repo 根目錄的 rune-seal.ps1（加密端）與 rune-open.ps1（解密端 + 金鑰管理）
+    跑一套完整案例；-Pack 相關案例一律對 rune-seal.ps1 執行，
     -Unpack / -GenerateKeys / -ExportPublicKey 相關案例一律對 rune-open.ps1 執行。
+    兩支都是薄入口腳本，實作在 RunePost\ 模組內。
+
+    （模組化重構期間本檔曾以雙軌執行——同一批案例分別對舊 dist\ 產物與新入口
+     腳本各跑一遍，並要求同一案號在兩軌的結果逐格相同。等價已證實、dist\ 與
+     src\ 與 build.ps1 已移除，故拆回單軌。見 git log。）
 
 .PARAMETER RepoRoot
-    repo 根目錄（內含 dist\rune-seal.ps1 / dist\rune-open.ps1）。
+    repo 根目錄（內含 rune-seal.ps1 / rune-open.ps1 與 RunePost\ 模組）。
 
 .EXAMPLE
     pwsh -File .\verify.ps1 -RepoRoot Z:\path\to\repo
@@ -49,8 +54,10 @@ $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:Utf8Bom = [System.Text.UTF8Encoding]::new($true)
 
 $script:RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-$script:SealScript = Join-Path $script:RepoRoot 'dist\rune-seal.ps1'
-$script:OpenScript = Join-Path $script:RepoRoot 'dist\rune-open.ps1'
+
+$script:SealScript = Join-Path $script:RepoRoot 'rune-seal.ps1'
+$script:OpenScript = Join-Path $script:RepoRoot 'rune-open.ps1'
+$script:ModuleRoot = Join-Path $script:RepoRoot 'RunePost'
 
 function Write-Log {
     param([string]$Text)
@@ -609,7 +616,17 @@ function Test-NoForbiddenSymbols {
 
 function New-HomeSandbox {
     param([string]$Name)
-    $dir = New-Dir (Join-Path $script:Work "home_$Name")
+    # 沙箱一律從空的開始：先砍掉同名殘留再建。頂層 -Clean 用的是
+    # Remove-Item -ErrorAction SilentlyContinue，任何一個檔案刪不掉（被佔用、
+    # 上一輪的子行程還沒退乾淨）都會靜默留下殘骸，而一個「已經有 private.key」
+    # 的沙箱會讓 -GenerateKeys 走到「私鑰已存在」分支——既可能製造假紅（本案
+    # 一開始就是這樣誤判成搬移出錯），也可能讓某些案例假綠。沙箱是否乾淨是
+    # 每個金鑰案例的前提，不能靠呼叫端記得先清。
+    $dir = Join-Path $script:Work "home_$Name"
+    if ([System.IO.Directory]::Exists($dir)) {
+        Remove-Item -LiteralPath $dir -Recurse -Force
+    }
+    [void](New-Dir $dir)
     return @{
         Path = $dir
         Env  = @{
@@ -683,7 +700,13 @@ function New-TestKeyPair {
         if ($found.Count -gt 0) { $keyPath = $found[0] }
         elseif ($escaped) { $keyPath = $escaped }
     }
-    $pem = Get-PemBlock -Text $res.All
+    # 公鑰 PEM 一律從落地的 ~\.rune\public.pem 讀取，不再從 stdout 擷取——
+    # -GenerateKeys 的成功輸出已改為「只印路徑與指紋，不印 PEM 全文」，
+    # 要看 PEM 內容請自行 Get-Content（見 rune-open.ps1 的 .DESCRIPTION）。
+    $pem = $null
+    if ([System.IO.File]::Exists($sb.PubPath)) {
+        $pem = Get-PemBlock -Text ([System.IO.File]::ReadAllText($sb.PubPath))
+    }
     return [pscustomobject]@{
         Name     = $Name
         Sandbox  = $sb
@@ -835,22 +858,85 @@ function Invoke-VerifyTrack {
     $script:PubSpkiA = $null
     $script:EcdhA = $null
     $script:KdfInfo = $null
+    $script:KeyForce = $null
+    $script:KeyForceBackup = $null
+    $script:CtBeforeRotate = $null
+    $script:CtBeforeRotateSrcSha = $null
 
     Write-Host ''
     Write-Host '-- 前置 --' -ForegroundColor Cyan
 
-    Invoke-TCase 'P0' 'build.ps1 -Check 通過（dist/ 與 src/ 現況一致）' {
+    Invoke-TCase 'P0' '模組結構自洽：可載入、恰好匯出四個函式、manifest 清單與 Public\ 一致' {
         <#
-            DESIGN.md §6.2：dist/ 與 src/ 不同步（有人手動編輯 dist/、或改了 src/
-            忘了重跑 build.ps1）是「拆檔架構」最主要的漂移風險，P0 沒過就沒有意義
-            測下面任何案例——測到的可能是一份跟目前 src/ 對不上的舊產物。
+            舊的 P0 是 build.ps1 -Check（dist/ 必須與 src/ 逐位元組一致）。組裝式
+            架構已移除，那個案例失去對象，一併刪掉。
+
+            但「漂移」這個風險並沒有消失，只是換了形狀：新架構的等價風險是
+            **manifest 的 FunctionsToExport 明確清單與 Public\ 底下的實際檔案不同步**。
+            psd1 刻意不用 '*'（萬用字元會讓模組自動載入器為命令探索解析整個模組，
+            有實測效能代價），代價就是新增／改名對外函式時必須手動同步這份清單，
+            忘了同步的後果是「函式存在但呼叫不到」或「清單列了不存在的函式」。
+            這一案就是舊 P0 的接班人：守住新架構自己的漂移風險，同樣排在最前面，
+            沒過就不必往下測。
+
+            順帶把「一檔一函式、檔名 = 函式名」也一起斷言——那是模組載入器
+            （Export-ModuleMember -Function $Public.BaseName）正確運作的前提。
         #>
-        $buildPs1 = Join-Path $script:RepoRoot 'build.ps1'
-        Assert ([System.IO.File]::Exists($buildPs1)) "找不到 build.ps1：$buildPs1"
-        $out = & $script:Pwsh -NoProfile -NoLogo -File $buildPs1 -Check 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
-        Assert ($exitCode -eq 0) ("build.ps1 -Check 失敗（exit={0}）：dist/ 與 src/ 現況不一致 => {1}" -f $exitCode, (Squash $out 300))
-        return (Squash $out 150)
+        Assert ([System.IO.Directory]::Exists($script:ModuleRoot)) "找不到模組資料夾：$script:ModuleRoot"
+        $psd1 = Join-Path $script:ModuleRoot 'RunePost.psd1'
+        Assert ([System.IO.File]::Exists($psd1)) "找不到 manifest：$psd1"
+
+        $probe = Join-Path $script:Work 'modprobe.ps1'
+        [System.IO.File]::WriteAllText($probe, @'
+$ErrorActionPreference = 'Stop'
+Import-Module $env:RUNE_MODULE -Force
+$m = Get-Module RunePost
+'EXPORTED=' + (($m.ExportedFunctions.Keys | Sort-Object) -join ',')
+'CMDLETS=' + $m.ExportedCmdlets.Count
+'ALIASES=' + $m.ExportedAliases.Count
+'VARIABLES=' + $m.ExportedVariables.Count
+'VERSION=' + $m.Version
+$mf = Test-ModuleManifest $env:RUNE_MANIFEST
+'MANIFEST=' + (($mf.ExportedFunctions.Keys | Sort-Object) -join ',')
+'PSVERSION=' + $mf.PowerShellVersion
+'@, $script:Utf8Bom)
+        $r = Invoke-Transfer -ScriptPath $probe -EnvVars @{ RUNE_MODULE = $script:ModuleRoot; RUNE_MANIFEST = $psd1 }
+        Assert (-not $r.TimedOut) '模組載入探針逾時'
+        Assert ($r.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($r.StdErr)) `
+        ('Import-Module 失敗：' + (Squash $r.All 300))
+
+        $kv = @{}
+        foreach ($line in ($r.StdOut -split "`r?`n")) {
+            if ($line -match '^([A-Z]+)=(.*)$') { $kv[$Matches[1]] = $Matches[2] }
+        }
+        $onDisk = @(Get-ChildItem -LiteralPath (Join-Path $script:ModuleRoot 'Public') -Filter '*.ps1' -File |
+                ForEach-Object { $_.BaseName } | Sort-Object) -join ','
+        Assert ($kv['EXPORTED'] -eq $onDisk) `
+        ('實際匯出的函式與 Public\ 檔名不一致：匯出 [{0}]，Public\ [{1}]' -f $kv['EXPORTED'], $onDisk)
+        Assert ($kv['MANIFEST'] -eq $onDisk) `
+        ('manifest 的 FunctionsToExport 與 Public\ 檔名不同步：manifest [{0}]，Public\ [{1}]' -f $kv['MANIFEST'], $onDisk)
+        Assert ($kv['MANIFEST'] -notmatch '\*') "FunctionsToExport 不得使用萬用字元"
+        foreach ($k in @('CMDLETS', 'ALIASES', 'VARIABLES')) {
+            Assert ($kv[$k] -eq '0') ("模組不該匯出任何 $k，實際 $($kv[$k]) 個")
+        }
+        Assert ($kv['PSVERSION'] -eq '7.4') ('manifest PowerShellVersion 不是 7.4：' + $kv['PSVERSION'])
+
+        # 一檔一函式、檔名 = 函式名（Export-ModuleMember -Function $Public.BaseName 的前提）
+        $bad = @()
+        foreach ($f in Get-ChildItem -LiteralPath $script:ModuleRoot -Recurse -Filter '*.ps1' -File) {
+            $t = $null; $e = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+            if ($e.Count -gt 0) { $bad += "$($f.Name)：解析錯誤 $($e[0].Message)"; continue }
+            $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false))
+            if ($fn.Count -ne 1) { $bad += "$($f.Name)：含 $($fn.Count) 個函式（應恰好 1 個）"; continue }
+            if ($fn[0].Name -ne $f.BaseName) { $bad += "$($f.Name)：函式名 $($fn[0].Name) 與檔名不符" }
+        }
+        Assert ($bad.Count -eq 0) ('模組檔案結構違規：' + ($bad -join '; '))
+
+        $pubCount = @(Get-ChildItem -LiteralPath (Join-Path $script:ModuleRoot 'Public') -Filter '*.ps1' -File).Count
+        $privCount = @(Get-ChildItem -LiteralPath (Join-Path $script:ModuleRoot 'Private') -Filter '*.ps1' -File).Count
+        return ('模組 v{0} 載入成功；匯出 {1} 個函式（{2}）且與 manifest／Public\ 三方一致；Public {3} 檔 / Private {4} 檔，全部一檔一函式且檔名相符' -f `
+                $kv['VERSION'], @($onDisk -split ',').Count, $onDisk, $pubCount, $privCount)
     }
 
     Invoke-TCase 'P1a' '受測腳本存在且語法可解析（seal）' {
@@ -875,16 +961,25 @@ function Invoke-VerifyTrack {
         return ('{0}；{1} 位元組；語法 OK' -f (Split-Path -Leaf $script:SutOpen), (Get-Item -LiteralPath $script:SutOpen).Length)
     }
 
-    Invoke-TCase 'P2' '產物中不存在任何 $PublicKeyPem 賦值（公鑰已徹底外部化；seal + open 皆須檢查）' {
+    Invoke-TCase 'P2' '不存在任何 $PublicKeyPem 賦值（公鑰已徹底外部化；入口腳本 + 模組全檔皆須檢查）' {
+        # 掃描範圍必須含整個 RunePost\：實作已從單檔搬進模組，只掃兩支薄入口腳本
+        # 會讓這個斷言變成必然通過——內嵌公鑰真的長回來也掃不到。
         Assert ($null -ne $script:SutSeal -and $null -ne $script:SutOpen) '前置 P1a/P1b 未通過'
-        foreach ($pair in @(@{ N = 'seal'; P = $script:SutSeal }, @{ N = 'open'; P = $script:SutOpen })) {
+        $targets = @(
+            @{ N = 'seal'; P = $script:SutSeal }
+            @{ N = 'open'; P = $script:SutOpen }
+        )
+        foreach ($f in Get-ChildItem -LiteralPath $script:ModuleRoot -Recurse -Include '*.ps1', '*.psm1', '*.psd1' -File) {
+            $targets += @{ N = "RunePost\$($f.Name)"; P = $f.FullName }
+        }
+        foreach ($pair in $targets) {
             $text = [System.IO.File]::ReadAllText($pair.P)
             $f = Find-PublicKeyAssignment -Text $text
             $where = if ($null -ne $f.Hit) { $f.Hit.Extent.StartLineNumber } else { 0 }
-            Assert ($null -eq $f.Hit) ('{0} 產物仍保留 $PublicKeyPem 賦值（行 {1}）：內嵌公鑰未徹底移除' -f $pair.N, $where)
-            Assert (-not ($text -match 'PublicKeyPem')) ('{0} 產物仍出現 PublicKeyPem 字樣，內嵌公鑰的路徑未清乾淨' -f $pair.N)
+            Assert ($null -eq $f.Hit) ('{0} 仍保留 $PublicKeyPem 賦值（行 {1}）：內嵌公鑰未徹底移除' -f $pair.N, $where)
+            Assert (-not ($text -match 'PublicKeyPem')) ('{0} 仍出現 PublicKeyPem 字樣，內嵌公鑰的路徑未清乾淨' -f $pair.N)
         }
-        return ('seal + open 兩產物皆無 $PublicKeyPem 賦值、無 PublicKeyPem 字樣；公鑰改為執行期讀取')
+        return ('掃過 {0} 個檔案（2 支入口腳本 + 整個 RunePost\），皆無 $PublicKeyPem 賦值、無 PublicKeyPem 字樣；公鑰改為執行期讀取' -f $targets.Count)
     }
 
     Invoke-TCase 'P3' '家目錄沙箱可用（不污染真實 ~\.rune）' {
@@ -901,7 +996,7 @@ function Invoke-VerifyTrack {
         Assert ($null -ne $script:SutOpen) '前置 P1b 未通過'
         $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:SutOpen
         Assert ($script:KeyA.HasKey) ('未在 ~\.rune\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
-        Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未印出 PUBLIC KEY PEM 區塊；輸出=' + (Squash $script:KeyA.Result.All 160))
+        Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未在 ~\.rune\public.pem 寫出合法的 PUBLIC KEY PEM；輸出=' + (Squash $script:KeyA.Result.All 160))
         $script:PubPemA = $script:KeyA.PublicPem
         $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
         $ec.ImportFromPem($script:PubPemA)
@@ -921,7 +1016,10 @@ function Invoke-VerifyTrack {
         return ('金鑰 B 就緒；與 A 的 blob 不同')
     }
 
-    Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem（不再製作任何腳本副本）' {
+    Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem，且與 -GenerateKeys 印出的指紋對得起來' {
+        # -GenerateKeys 不再印 PEM 全文，因此「印出的公鑰 vs 落地的公鑰」已無從逐字比對；
+        # 改以「印出的指紋 == 獨立重算 SHA-256(落地 public.pem 的 SPKI DER)[0..15]」驗證
+        # 兩者確實是同一把——這比原本的字串比對更嚴格，也直接守住指紋這條防線。
         Assert ($null -ne $script:PubPemA) '前置 P4 未通過'
         $pub = $script:KeyA.Sandbox.PubPath
         Assert ([System.IO.File]::Exists($pub)) "-GenerateKeys 未在沙箱家目錄寫出 public.pem：$pub"
@@ -930,12 +1028,19 @@ function Invoke-VerifyTrack {
         $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
         $ec.ImportFromPem($onDisk)
         Assert ([Convert]::ToHexString($ec.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
-            'public.pem 內的公鑰與 -GenerateKeys 印出的 PEM 不是同一把'
-        return ('沙箱 ~\.rune\public.pem 就緒且與印出的公鑰一致；seal / open 皆直接對原檔執行，全程未製作任何腳本副本')
+            'public.pem 內的公鑰與 P4 取得的公鑰不是同一把'
+        $m = [regex]::Match($script:KeyA.Result.All, 'RUNE-KEY\s+([0-9A-F]{4}(?:-[0-9A-F]{4}){7})')
+        Assert ($m.Success) ('-GenerateKeys 未印出 RUNE-KEY 指紋：' + (Squash $script:KeyA.Result.All 200))
+        $digest = [System.Security.Cryptography.SHA256]::HashData($script:PubSpkiA)
+        $hex = [Convert]::ToHexString($digest, 0, 16)
+        $expect = ((0..7) | ForEach-Object { $hex.Substring($_ * 4, 4) }) -join '-'
+        Assert ($m.Groups[1].Value -eq $expect) `
+        ('印出的指紋與落地 public.pem 對不起來：印出 {0}，重算 {1}' -f $m.Groups[1].Value, $expect)
+        return ('沙箱 ~\.rune\public.pem 就緒，指紋 RUNE-KEY {0} 與印出值逐字相符；seal / open 皆直接對原檔執行，全程未製作任何腳本副本' -f $expect)
     }
 
-    # 前置未過就沒有意義往下跑（只看本軌新增的 P 系列結果，不受另一軌影響）
-    $preFailCount = @($script:Results | Where-Object { $_.No -like 'P*' -and $_.Result -eq 'FAIL' }).Count
+    # 前置未過就沒有意義往下跑（只看本軌的 P 系列結果，不受另一軌影響）
+    $preFailCount = @($script:Results | Where-Object { $_.Track -eq $TrackName -and $_.No -like 'P*' -and $_.Result -eq 'FAIL' }).Count
     $trackCanRun = ($preFailCount -eq 0)
 
     # ------- 共用測試素材 -------
@@ -1489,19 +1594,126 @@ function Invoke-VerifyTrack {
         return ('未指定 -KeyFile，從 ~\.rune\private.key 讀取成功')
     }
 
-    Invoke-TCase 'C34' '-GenerateKeys 私鑰已存在時拒絕覆蓋' {
+    # ---- -GenerateKeys 對「私鑰已存在」的處置（期望值已於 ed9442d 翻轉）----
+    # 舊規格：一律拒絕。新規格（見 rune-open.ps1 的 .DESCRIPTION）：
+    #   互動環境 → 印出現有指紋後詢問（預設不繼續）；
+    #   非互動環境（stdin 被重導向）且無 -Force → 直接拒絕，不卡在提示；
+    #   帶 -Force → 略過提示，先把舊的 private.key / public.pem 改名為
+    #               <原檔名>.bak-<時間戳>（是改名不是刪除），才寫入新金鑰對。
+    # 本套件的子行程一律關閉 stdin，因此 C34 測到的是「非互動 + 無 -Force」那條路徑；
+    # C65 / C66 補上 -Force 這條路徑的落地行為與救援路徑。
+
+    Invoke-TCase 'C34' '-GenerateKeys 私鑰已存在 + 非互動且無 -Force → 拒絕，且完全不動既有檔案' {
+        $runeDir = Join-Path $script:KeyA.Sandbox.Path '.rune'
         $before = Get-Sha $script:KeyA.KeyPath
+        $bakBefore = @([System.IO.Directory]::EnumerateFiles($runeDir, '*.bak-*')).Count
         $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-GenerateKeys') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
         [void](Assert-NoHomeEscape -When 'C34')
         $ev = Expect-Failure $r 'exists' '私鑰已存在'
         Assert ((Get-Sha $script:KeyA.KeyPath) -eq $before) '既有私鑰被覆蓋了'
-        return ("$ev；既有私鑰 SHA 未變")
+        # 拒絕就是拒絕：不得留下任何備份檔（那代表已經動手改名了才失敗）
+        $bakAfter = @([System.IO.Directory]::EnumerateFiles($runeDir, '*.bak-*')).Count
+        Assert ($bakAfter -eq $bakBefore) ('被拒絕卻仍產生了備份檔（{0} → {1}）' -f $bakBefore, $bakAfter)
+        # 訊息必須指出 -Force 這條出路，否則使用者在非互動環境下無路可走
+        Assert ($r.StdErr -match '-Force') ('拒絕訊息未指引可用 -Force：' + (Squash $r.StdErr 200))
+        return ("$ev；既有私鑰 SHA 未變、無備份檔產生、訊息有指引 -Force")
     }
 
-    Invoke-TCase 'C35' '-GenerateKeys 印出公鑰 PEM、public.pem 路徑與指紋' {
+    Invoke-TCase 'C65' '-GenerateKeys -Force：產生新金鑰，舊私鑰改名保留為 private.key.bak-* 且位元組不變' {
+        $kf = New-TestKeyPair -Name 'force' -ScriptPath $script:SutOpen
+        Assert (-not $kf.Result.Failed) ('前置：force 沙箱 -GenerateKeys 失敗 => ' + (Squash $kf.Result.All 160))
+        Assert ($kf.HasKey) '前置：force 沙箱未產生第一把私鑰'
+        Assert ($null -ne $kf.PublicPem) '前置：force 沙箱未寫出 public.pem'
+        $script:KeyForce = $kf
+        $runeDir = Join-Path $kf.Sandbox.Path '.rune'
+
+        # 先用第一把金鑰加密一份密文，供 C66 用備份私鑰解回來
+        $src = Join-Path $script:Fx 'single\payload.bin'
+        $old = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'beforerotate.txt'
+        if ([System.IO.File]::Exists($old)) { [System.IO.File]::Delete($old) }
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutSeal `
+                    -Arguments @('-Pack', $src, '-OutFile', $old, '-PublicKey', $kf.Sandbox.PubPath) `
+                    -EnvVars $kf.Sandbox.Env) 'Pack(輪替前的公鑰)')
+        $script:CtBeforeRotate = $old
+        $script:CtBeforeRotateSrcSha = Get-Sha $src
+
+        $oldKeyBytes = [System.IO.File]::ReadAllBytes($kf.KeyPath)
+        $oldKeySha = Get-Sha $kf.KeyPath
+        $oldPubText = [System.IO.File]::ReadAllText($kf.Sandbox.PubPath)
+
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-GenerateKeys', '-Force') -EnvVars $kf.Sandbox.Env -WorkDir $kf.Sandbox.Path
+        [void](Assert-NoHomeEscape -When 'C65')
+        [void](Expect-Success $r '-GenerateKeys -Force')
+
+        # 新金鑰確實產生且與舊的不同
+        Assert ([System.IO.File]::Exists($kf.KeyPath)) '-Force 後 private.key 不存在'
+        $newKeySha = Get-Sha $kf.KeyPath
+        Assert ($newKeySha -ne $oldKeySha) '-Force 後 private.key 內容未改變（沒有真的換新金鑰）'
+
+        # 舊私鑰是「改名保留」而不是刪除
+        $keyBaks = @([System.IO.Directory]::EnumerateFiles($runeDir, 'private.key.bak-*'))
+        Assert ($keyBaks.Count -eq 1) ('private.key.bak-* 應恰好 1 個，實得 {0}：{1}' -f $keyBaks.Count, (($keyBaks | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
+        $bakName = Split-Path -Leaf $keyBaks[0]
+        Assert ($bakName -match '^private\.key\.bak-\d{8}-\d{6}') ("備份檔名不是 private.key.bak-<時間戳> 格式：$bakName")
+        $script:KeyForceBackup = $keyBaks[0]
+
+        # 備份檔與舊私鑰逐位元組相同
+        $bakBytes = [System.IO.File]::ReadAllBytes($keyBaks[0])
+        Assert ($bakBytes.Length -eq $oldKeyBytes.Length) ('備份長度 {0} 與舊私鑰 {1} 不符' -f $bakBytes.Length, $oldKeyBytes.Length)
+        $same = $true
+        for ($i = 0; $i -lt $bakBytes.Length; $i++) { if ($bakBytes[$i] -ne $oldKeyBytes[$i]) { $same = $false; break } }
+        Assert $same '備份檔內容與舊私鑰不是逐位元組相同'
+        Assert ((Get-Sha $keyBaks[0]) -eq $oldKeySha) '備份檔 SHA-256 與舊私鑰不符'
+
+        # public.pem 同樣改名保留，且內容是舊的那把
+        $pubBaks = @([System.IO.Directory]::EnumerateFiles($runeDir, 'public.pem.bak-*'))
+        Assert ($pubBaks.Count -eq 1) ('public.pem.bak-* 應恰好 1 個，實得 {0}' -f $pubBaks.Count)
+        Assert ([System.IO.File]::ReadAllText($pubBaks[0]) -eq $oldPubText) '公鑰備份內容與舊 public.pem 不同'
+        Assert ((Split-Path -Leaf $pubBaks[0]) -eq ($bakName -replace '^private\.key', 'public.pem')) `
+        ('私鑰／公鑰備份未共用同一個時間戳：{0} vs {1}' -f $bakName, (Split-Path -Leaf $pubBaks[0]))
+
+        # 新的 public.pem 已重寫成新金鑰的，指紋也跟著變
+        $newPub = Get-PemBlock -Text ([System.IO.File]::ReadAllText($kf.Sandbox.PubPath))
+        Assert ($null -ne $newPub) '-Force 後 public.pem 不是合法 PEM'
+        Assert ($newPub -ne (Get-PemBlock -Text $oldPubText)) '-Force 後 public.pem 仍是舊公鑰'
+        Assert ($r.All -match 'RUNE-KEY') '-Force 後未印出新指紋'
+        Assert ($r.All -match [regex]::Escape($bakName)) ('輸出未告知備份檔位置（使用者無從得知舊金鑰去哪了）：' + (Squash $r.All 200))
+        return ("舊私鑰改名為 $bakName（逐位元組相同）、public.pem 同時間戳備份、新金鑰已寫入且指紋改變")
+    }
+
+    Invoke-TCase 'C66' '輪替後仍可用 -KeyFile 指向 private.key.bak-* 解開舊密文' {
+        Assert ($null -ne $script:KeyForceBackup) '前置 C65 未產生備份私鑰'
+        $dest = New-Dir (Join-Path $script:Work 'unpack\rotated_backup')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        # 先確認新金鑰確實解不開舊密文（證明金鑰真的換了，備份不是多餘的）
+        $destNew = New-Dir (Join-Path $script:Work 'unpack\rotated_newkey')
+        Get-ChildItem -LiteralPath $destNew -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        $rn = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-Unpack', $script:CtBeforeRotate, '-Destination', $destNew, '-KeyFile', $script:KeyForce.KeyPath) `
+            -EnvVars $script:KeyForce.Sandbox.Env
+        Assert ($rn.Failed) '輪替後的新私鑰竟然解得開舊密文（金鑰沒真的換）'
+        Assert ((Get-TreeMap $destNew).Count -eq 0) '新私鑰解不開卻仍寫出檔案'
+
+        # 備份私鑰解得開，且內容位元一致
+        $rb = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-Unpack', $script:CtBeforeRotate, '-Destination', $dest, '-KeyFile', $script:KeyForceBackup) `
+            -EnvVars $script:KeyForce.Sandbox.Env
+        [void](Expect-Success $rb 'Unpack(-KeyFile 指向備份私鑰)')
+        $d = Compare-MapExact @{ 'payload.bin' = $script:CtBeforeRotateSrcSha } (Get-TreeMap $dest)
+        Assert ($null -eq $d) $d
+        return ('新私鑰解不開舊密文；改用 -KeyFile ' + (Split-Path -Leaf $script:KeyForceBackup) + ' 則位元一致還原，救援路徑成立')
+    }
+
+    Invoke-TCase 'C35' '-GenerateKeys 只印路徑與指紋，不印 PEM 全文' {
+        # 期望值翻轉（見 git log ed9442d「rune-open 使用體驗調整：輸出精簡」）：
+        # 成功輸出改為「私鑰路徑 / 公鑰路徑 / 指紋」三行，PEM 全文不再印出——
+        # 路徑已經給了，要看內容用 Get-Content。這裡連「不得印出」都一併斷言，
+        # 否則哪天又把 PEM 塞回去也沒人會發現。
         $o = $script:KeyA.Result.All
-        Assert ($null -ne (Get-PemBlock -Text $o)) '未印出 PUBLIC KEY PEM'
+        Assert ($null -eq (Get-PemBlock -Text $o)) ('輸出仍含 PUBLIC KEY PEM 全文（應只印路徑與指紋）：' + (Squash $o 200))
         Assert ($o -match 'public\.pem') '未指引使用者把 public.pem 交給加密端'
+        Assert ($o -match 'private\.key') '未印出私鑰檔路徑'
         Assert ($o -match 'RUNE-KEY') '未印出公鑰指紋（RUNE-KEY ...），加密端無從比對'
         return (Squash (($o -split "`r?`n" | Where-Object { $_ -match 'public\.pem|RUNE-KEY' } | Select-Object -First 1)) 110)
     }
@@ -1679,27 +1891,29 @@ function Invoke-VerifyTrack {
         return (Squash $r.StdErr 130)
     }
 
-    # 負面符號掃描守的是「最小部署」這個屬性本身：加密端不該帶著任何解密相關的
-    # 程式碼（DPAPI／私鑰匯入／ZIP 解包），反之亦然。沒有這道檢查，幾次「順手」
-    # 的改動之後解密邏輯會慢慢滲回加密端，切檔就白做了。只掃「非註解」token
-    # （見 Test-NoForbiddenSymbols），註解裡的交叉參照說明不算違規。
+    # 負面符號掃描原本守的是「最小部署」：加密端不該帶著任何解密相關的程式碼
+    # （DPAPI／私鑰匯入／ZIP 解包），反之亦然。這個屬性建立在「單檔部署、seal 與
+    # open 是兩份互不重疊的產物」之上。
+    #
+    # 模組化之後這個前提沒了：單檔部署已放棄，加密端改為複製整個 RunePost\
+    # 資料夾，解密端的程式碼本來就會一起過去。兩案因此無法再以 PASS/FAIL 表述
+    # ——只掃兩支薄入口腳本會變成必然通過（守不住任何東西），掃模組則必然失敗
+    # （模組刻意兩邊都有）。改記為 INFO，把「這個屬性已被架構決策放棄」這件事
+    # 留在報表裡，而不是靜悄悄刪掉案例讓它從歷史上消失。
+    #
+    # 待決（階段二）：「最小部署」是否仍是目標。若是，可考慮改成別的表述，例如
+    # 斷言 Public\Invoke-RuneSeal.ps1 的相依閉包不含任何私鑰／解包函式——那守的
+    # 是相依方向而非檔案內容，在模組架構下才成立。
 
-    Invoke-TCase 'C63' '負面符號掃描：rune-seal.ps1 的程式碼不含任何解密端專屬符號' {
-        Test-NoForbiddenSymbols -Path $script:SutSeal -Forbidden @(
-            'ImportPkcs8PrivateKey', 'ProtectedData',
-            'Expand-RuneZip', 'Move-RuneExtractedTree',
-            'Get-RunePrivateKey', 'Invoke-RuneOpen',
-            'Invoke-RuneGenerateKeys', 'Invoke-RuneExportPublicKey',
-            'DefaultKeyFile', 'DefaultKeyDir'
-        )
+    Invoke-TCase 'C63' '（已失效）負面符號掃描：加密端不含解密端專屬符號' {
+        Info-Case ('單檔部署已隨模組化放棄，加密端改為複製整個 RunePost\ 資料夾，' +
+            '「加密端不含解密程式碼」不再成立；只掃薄入口腳本則形同必然通過。' +
+            '本案改記為 INFO，是否以「相依方向」重新表述留待階段二決定。')
     }
 
-    Invoke-TCase 'C64' '負面符號掃描：rune-open.ps1 的程式碼不含任何加密端專屬符號' {
-        Test-NoForbiddenSymbols -Path $script:SutOpen -Forbidden @(
-            'Get-RunePackPlan', 'New-RuneZipBytes', 'Compress-RuneBrotli',
-            'Get-RunePublicKey', 'Get-RuneMissingPublicKeyMessage',
-            'Protect-RuneAesGcm', 'New-RuneContainer', 'Invoke-RuneSeal'
-        )
+    Invoke-TCase 'C64' '（已失效）負面符號掃描：解密端不含加密端專屬符號' {
+        Info-Case ('同 C63：模組同時含 seal 與 open 兩側程式碼，' +
+            '此斷言的前提（兩份互不重疊的單檔產物）已不存在。')
     }
 
     Write-Host ''
@@ -1975,6 +2189,89 @@ function Invoke-VerifyTrack {
         $tmp = @([System.IO.Directory]::EnumerateDirectories($r.Dest, '.rune-tmp-*'))
         Assert ($tmp.Count -eq 0) '殘留暫存資料夾'
         return ('相對路徑 {0} 字元、來源全長 {1} 字元，含 .rune-tmp 前綴仍完整還原' -f $rel.Length, $srcFile.Length)
+    }
+
+    # ---- 以「模組」身分使用受測物（不經入口腳本）----
+    # 上面 74 案全部經由 rune-seal.ps1 / rune-open.ps1，而那兩支自己會設
+    # $ErrorActionPreference = 'Stop' 與 Set-StrictMode。也就是說「改成標準模組」
+    # 的主要理由——使用者可以 Import-Module 之後直接呼叫函式——在整套測試裡
+    # 一次都沒被走到，模組在「呼叫端什麼都沒設」的預設 session 下能不能正常運作
+    # 是零覆蓋。C67 / C68 補這個洞：探針腳本刻意不設任何偏好（wrapper 給的是
+    # 預設的 Continue、StrictMode 也是關的），直接呼叫匯出的函式。
+
+    Invoke-TCase 'C67' '以模組身分直接呼叫 Invoke-RuneSeal / Invoke-RuneOpen 完成 roundtrip（不經入口腳本）' {
+        $src = Join-Path $script:Fx 'tree'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'asmodule.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+        $dest = New-Dir (Join-Path $script:Work 'unpack\asmodule')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        $probe = Join-Path $script:Work 'usemodule.ps1'
+        # 刻意不寫 $ErrorActionPreference、不寫 Set-StrictMode：這一案要測的就是
+        # 「呼叫端什麼都沒設」時模組自己站得住。
+        [System.IO.File]::WriteAllText($probe, @'
+Import-Module $env:RUNE_MODULE -Force
+"CALLER-EAP=$ErrorActionPreference"
+Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef $env:RUNE_PUB
+Invoke-RuneOpen -InFilePath $env:RUNE_OUT -DestinationPath $env:RUNE_DEST -KeyFilePath $env:RUNE_KEY
+'DONE'
+'@, $script:Utf8Bom)
+
+        $r = Invoke-Transfer -ScriptPath $probe -EnvVars @{
+            RUNE_MODULE = $script:ModuleRoot
+            RUNE_SRC    = $src
+            RUNE_OUT    = $out
+            RUNE_DEST   = $dest
+            RUNE_PUB    = $script:KeyA.Sandbox.PubPath
+            RUNE_KEY    = $script:KeyA.KeyPath
+        }
+        [void](Expect-Success $r '以模組身分 roundtrip')
+        Assert ($r.StdOut -match 'CALLER-EAP=Continue') `
+        ('探針 session 的 EAP 不是預設的 Continue，這一案就失去意義：' + (Squash $r.StdOut 120))
+        Assert ($r.StdOut -match 'DONE') '探針未跑完'
+        Assert ([System.IO.File]::Exists($out)) '直接呼叫 Invoke-RuneSeal 未產生容器'
+
+        $c = Read-Container $out
+        Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2 -and $c.ContentType -eq 1) '產物不是合法的 RUNE v2 容器'
+        $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $dest) -AllowRootPrefix 'tree'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+        return ('未經入口腳本、呼叫端偏好為預設（EAP=Continue、StrictMode 關）：{0} 檔位元一致還原；{1}' -f `
+            (Get-TreeMap $src).Count, $cmp.Convention)
+    }
+
+    Invoke-TCase 'C68' '模組被直接呼叫時錯誤路徑仍終止（不會靜默往下跑）' {
+        # 判準不是「有沒有印錯誤」，而是「失敗之後下一行有沒有被執行」——
+        # 只印錯誤卻繼續跑才是最危險的靜默失敗。
+        #
+        # 誠實界定這一案守得住什麼：實測把 .psm1 的 Set-StrictMode 與
+        # $ErrorActionPreference 兩行分別、一起拿掉共三組，整套 76 案結果與對照組
+        # 完全相同——現有錯誤路徑幾乎都走顯式 throw 或 .NET 例外，與 EAP 無關。
+        # 所以本案**不是**那兩行宣告的守門員，不能拿它當「宣告有效」的證據。
+        # 它真正的價值是：模組被直接呼叫（不經入口腳本）這條路徑原本零覆蓋，
+        # 而「失敗必須終止且不留半成品」是這條路徑上的對外契約，值得釘住。
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'modfail.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $probe = Join-Path $script:Work 'usemodule_fail.ps1'
+        [System.IO.File]::WriteAllText($probe, @'
+Import-Module $env:RUNE_MODULE -Force
+Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef $env:RUNE_PUB
+'SENTINEL-NOT-TERMINATED'
+'@, $script:Utf8Bom)
+
+        $r = Invoke-Transfer -ScriptPath $probe -EnvVars @{
+            RUNE_MODULE = $script:ModuleRoot
+            RUNE_SRC    = (Join-Path $script:Fx 'single\payload.bin')
+            RUNE_OUT    = $out
+            RUNE_PUB    = (Join-Path $script:Work 'no_such_dir\nokey.pem')
+        }
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '公鑰不存在卻沒有任何失敗跡象'
+        Assert (-not ($r.All -match 'SENTINEL-NOT-TERMINATED')) `
+        ('錯誤未終止：Invoke-RuneSeal 失敗後下一行仍被執行（靜默繼續）=> ' + (Squash $r.All 200))
+        Assert (-not [System.IO.File]::Exists($out)) '公鑰不存在卻仍產生了輸出檔'
+        Assert ($r.StdErr -match $script:ErrPatterns['nopub']) ('訊息未指明公鑰環節：' + (Squash $r.StdErr 200))
+        return ('公鑰不存在 → 直接呼叫模組函式時仍為終止性錯誤，後續語句未執行、無輸出檔；' + (Squash $r.StdErr 80))
     }
 
     Invoke-TCase 'C40' '原始受測腳本（seal + open）自始至終未被修改' {
