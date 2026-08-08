@@ -46,10 +46,19 @@ $ErrorActionPreference = 'Stop'
 #
 #   1. 在「解密端」（保管私鑰的那台機器）執行：
 #        pwsh .\rune-open.ps1 -GenerateKeys
-#      私鑰（ECDH P-256）會以 DPAPI（CurrentUser）保護後寫到 ~\.rune\private.key，
-#      公鑰同時寫到 ~\.rune\public.pem，畫面另外印出「公鑰指紋」。
-#      私鑰檔只有「同一台機器、同一個 Windows 帳號」能用 DPAPI 解回來，
-#      換機器或換帳號一律讀不開，因此不需要另外設密碼。
+#      私鑰（ECDH P-256）寫到 ~\.rune\private.key，公鑰同時寫到 ~\.rune\public.pem，
+#      畫面另外印出「公鑰指紋」。私鑰的靜態保護由 -Protect 決定，見下段。
+#   1a. 私鑰的三種儲存格式（-Protect，預設 None）：
+#        None        未加密的 PKCS#8 PEM。可直接複製備份到任何機器。
+#        Passphrase  密碼保護的 PKCS#8 PEM（PBKDF2-HMAC-SHA256 + AES-256-CBC）。
+#                    可備份，還原時需要密碼。
+#        Dpapi       DPAPI（CurrentUser）位元組。只有「同一台機器、同一個 Windows
+#                    帳號」解得開；換機器或換帳號一律讀不開，因此無法備份。
+#      載入端由檔案內容自動判別格式（見 Get-RunePrivateKeyFormat），三種格式共用
+#      同一個路徑，使用者不需要指定。
+#      密文一旦張貼到公開管道即為永久存在，而私鑰是唯一的還原手段：私鑰遺失等同
+#      所有歷來密文永久無法解密。預設 None 即是以「可攜、可備份」為優先。
+#   1b. 既有私鑰可用 -ExportPrivateKey 匯出成可備份的 PEM，來源包含 DPAPI 私鑰。
 #   2. 把 public.pem 交給「加密端」，放到該機器的 ~\.rune\public.pem
 #      （或用 -PublicKey 指定其他路徑／直接給 PEM 字串本體）。
 #   3. 加密端每次執行 -Pack 都會先印出所用公鑰的指紋，請與解密端印出的逐字比對。
@@ -112,6 +121,11 @@ $Script:DefaultKeyDir = Join-Path -Path $HOME -ChildPath '.rune'
 $Script:DefaultKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'private.key'
 $Script:DefaultPublicKeyFile = Join-Path -Path $Script:DefaultKeyDir -ChildPath 'public.pem'
 $Script:P256CurveOid = '1.2.840.10045.3.1.7'
+
+# 密碼保護 PKCS#8（PKCS#5 v2.0，PBKDF2-HMAC-SHA256 + AES-256-CBC）的迭代次數。
+# 取 OWASP 對 PBKDF2-HMAC-SHA256 的建議值；此參數會寫進 PEM 的
+# EncryptedPrivateKeyInfo 結構，解密端由檔案本身讀取，調整後不影響既有檔案的還原。
+$Script:Pkcs8PbeIterations = 600000
 
 # ==========================================================================
 # 載入器：Private 先於 Public（Public 依賴 Private，但 dot-source 只是定義函式，

@@ -13,6 +13,7 @@
         'Invoke-RuneOpen'
         'Invoke-RuneGenerateKeys'
         'Invoke-RuneExportPublicKey'
+        'Invoke-RuneExportPrivateKey'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

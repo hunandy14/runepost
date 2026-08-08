@@ -441,8 +441,17 @@ function Get-ZipCentralDirectory {
 # ==============================================================================
 
 function Import-PrivateKeyFromBlob {
+    # 私鑰檔有三種儲存格式（未加密 PKCS#8 PEM／密碼保護 PKCS#8 PEM／DPAPI 位元組），
+    # 共用同一個路徑、靠內容判別。此處只還原不需要密碼的兩種；密碼保護的一律回傳
+    # $null，由呼叫端當成「無法獨立重建」處理。
     param([string]$BlobPath)
     $blob = [System.IO.File]::ReadAllBytes($BlobPath)
+    $asText = [System.Text.Encoding]::UTF8.GetString($blob)
+    if ($asText -match '-----BEGIN ENCRYPTED PRIVATE KEY-----') { return $null }
+    if ($asText -match '-----BEGIN [A-Z ]*PRIVATE KEY-----') {
+        $pemKey = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        try { $pemKey.ImportFromPem($asText); return $pemKey } catch { return $null }
+    }
     $payload = $null
     foreach ($scope in @('CurrentUser', 'LocalMachine')) {
         try {
@@ -689,9 +698,12 @@ function Get-PemBlock {
 }
 
 function New-TestKeyPair {
-    param([string]$Name, [string]$ScriptPath)
+    # -Protect 省略時走受測物的預設值（None）；指定時原樣轉發給 -GenerateKeys。
+    param([string]$Name, [string]$ScriptPath, [string]$Protect)
     $sb = New-HomeSandbox -Name $Name
-    $res = Invoke-Transfer -ScriptPath $ScriptPath -Arguments @('-GenerateKeys') -EnvVars $sb.Env -WorkDir $sb.Path
+    $genArgs = @('-GenerateKeys')
+    if ($Protect) { $genArgs += @('-Protect', $Protect) }
+    $res = Invoke-Transfer -ScriptPath $ScriptPath -Arguments $genArgs -EnvVars $sb.Env -WorkDir $sb.Path
     $escaped = Assert-NoHomeEscape -When "-GenerateKeys($Name)"
     $keyPath = $sb.KeyPath
     if (-not [System.IO.File]::Exists($keyPath)) {
@@ -735,6 +747,56 @@ function Invoke-Roundtrip {
     $u = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $script:KeyA.KeyPath) -EnvVars $script:KeyA.Sandbox.Env
     [void](Expect-Success $u "Unpack($Name)")
     return [pscustomobject]@{ Out = $out; Dest = $dest; Pack = $p; Unpack = $u }
+}
+
+# 指定金鑰對的 roundtrip：公鑰與私鑰都取自該金鑰對自己的沙箱，供「同一種私鑰儲存
+# 格式從產生到解密走完整條路」的案例使用（Invoke-Roundtrip 固定用金鑰 A）。
+function Invoke-KeyRoundtrip {
+    param($Key, [string]$Name, [string]$Source, [string[]]$UnpackExtra = @())
+    $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) "$Name.txt"
+    if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+    $dest = New-Dir (Join-Path $script:Work "unpack\$Name")
+    Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+    $p = Invoke-Transfer -ScriptPath $script:SutSeal `
+        -Arguments @('-Pack', $Source, '-OutFile', $out, '-PublicKey', $Key.Sandbox.PubPath) -EnvVars $Key.Sandbox.Env
+    [void](Expect-Success $p "Pack($Name)")
+
+    $u = Invoke-Transfer -ScriptPath $script:SutOpen `
+        -Arguments (@('-Unpack', $out, '-Destination', $dest, '-KeyFile', $Key.KeyPath) + $UnpackExtra) -EnvVars $Key.Sandbox.Env
+    [void](Expect-Success $u "Unpack($Name)")
+    return [pscustomobject]@{ Out = $out; Dest = $dest; Pack = $p; Unpack = $u }
+}
+
+# 以模組身分執行一段探針腳本。SecureString 無法從命令列傳給入口腳本，因此凡是需要
+# 密碼的案例都走這條路徑：在子行程內建構 SecureString 並直接呼叫模組匯出的函式。
+# 子行程的家目錄一律由 ProcessStartInfo 的環境變數決定（$HOME 在 session 啟動時
+# 定案，行程內再改 $env:HOME 不會影響 ~ 的解析）。
+function Invoke-RuneProbe {
+    param([string]$Name, [string]$Body, [hashtable]$EnvVars, [int]$Timeout = 180)
+    $probe = Join-Path $script:Work "probe_$Name.ps1"
+    [System.IO.File]::WriteAllText($probe, $Body, $script:Utf8Bom)
+    $ev = @{ RUNE_MODULE = $script:ModuleRoot }
+    if ($EnvVars) { foreach ($k in $EnvVars.Keys) { $ev[$k] = [string]$EnvVars[$k] } }
+    return Invoke-Transfer -ScriptPath $probe -EnvVars $ev -Timeout $Timeout
+}
+
+# fixtures\wild 的預期還原內容（$script:CtWild 這份密文的明文側）
+function Get-WildExpectedMap {
+    $dir = Join-Path $script:Fx 'wild'
+    $m = @{}
+    foreach ($n in @('alpha.txt', '中文檔名測試.txt', '第二個 檔案.txt')) { $m[$n] = Get-Sha (Join-Path $dir $n) }
+    return $m
+}
+
+# 探針輸出的 KEY=VALUE 行 -> hashtable
+function ConvertFrom-ProbeOutput {
+    param([string]$Text)
+    $kv = @{}
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^([A-Z0-9_]+)=(.*)$') { $kv[$Matches[1]] = $Matches[2] }
+    }
+    return $kv
 }
 
 function Copy-Container {
@@ -862,11 +924,20 @@ function Invoke-VerifyTrack {
     $script:KeyForceBackup = $null
     $script:CtBeforeRotate = $null
     $script:CtBeforeRotateSrcSha = $null
+    $script:KeyPassSandbox = $null
+    $script:CtPass = $null
+    $script:LegacyDpapiKey = $null
+    $script:ExportedPlainKey = $null
+    $script:ExportedEncKey = $null
+
+    # 密碼保護案例共用的密碼。含空白、非 ASCII 與符號，順帶涵蓋 SecureString 經
+    # 環境變數傳入子行程後仍逐字相符（密碼錯一個字元就解不開，等於同時是編碼測試）。
+    $script:PassphraseText = 'rune 通行碼 #42 ok'
 
     Write-Host ''
     Write-Host '-- 前置 --' -ForegroundColor Cyan
 
-    Invoke-TCase 'P0' '模組結構自洽：可載入、恰好匯出四個函式、manifest 清單與 Public\ 一致' {
+    Invoke-TCase 'P0' '模組結構自洽：可載入、manifest 匯出清單與 Public\ 檔名一致' {
         <#
             舊的 P0 是 build.ps1 -Check（dist/ 必須與 src/ 逐位元組一致）。組裝式
             架構已移除，那個案例失去對象，一併刪掉。
@@ -992,9 +1063,13 @@ $mf = Test-ModuleManifest $env:RUNE_MANIFEST
         return ('~ / $HOME / $env:USERPROFILE 皆指向沙箱；真實私鑰存在={0}' -f $script:RealKeyExisted)
     }
 
-    Invoke-TCase 'P4' '受測物 -GenerateKeys 產生測試金鑰 A（open）' {
+    # 主測試金鑰 A（與備用金鑰 B）固定以 -Protect Dpapi 產生。其後絕大多數案例都用
+    # 金鑰 A 解密，因此整套案例同時就是「DPAPI 私鑰仍然可用」的回歸保護，涵蓋使用者
+    # 手上既有的那一把。預設格式 None 由 C65／C66／C69 涵蓋，密碼保護格式由 C71 起
+    # 的案例涵蓋。
+    Invoke-TCase 'P4' '受測物 -GenerateKeys -Protect Dpapi 產生測試金鑰 A（open）' {
         Assert ($null -ne $script:SutOpen) '前置 P1b 未通過'
-        $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:SutOpen
+        $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:SutOpen -Protect 'Dpapi'
         Assert ($script:KeyA.HasKey) ('未在 ~\.rune\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
         Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未在 ~\.rune\public.pem 寫出合法的 PUBLIC KEY PEM；輸出=' + (Squash $script:KeyA.Result.All 160))
         $script:PubPemA = $script:KeyA.PublicPem
@@ -1010,7 +1085,7 @@ $mf = Test-ModuleManifest $env:RUNE_MANIFEST
 
     Invoke-TCase 'P5' '產生第二組測試金鑰 B（供錯誤私鑰案例）' {
         Assert ($null -ne $script:SutOpen) '前置 P1b 未通過'
-        $script:KeyB = New-TestKeyPair -Name 'B' -ScriptPath $script:SutOpen
+        $script:KeyB = New-TestKeyPair -Name 'B' -ScriptPath $script:SutOpen -Protect 'Dpapi'
         Assert ($script:KeyB.HasKey) '第二組私鑰未產生'
         Assert ((Get-Sha $script:KeyB.KeyPath) -ne (Get-Sha $script:KeyA.KeyPath)) '兩次 -GenerateKeys 產生相同的私鑰 blob（金鑰未隨機）'
         return ('金鑰 B 就緒；與 A 的 blob 不同')
@@ -1555,7 +1630,7 @@ $mf = Test-ModuleManifest $env:RUNE_MANIFEST
     Write-Host ''
     Write-Host '-- 金鑰儲存 / GenerateKeys --' -ForegroundColor Cyan
 
-    Invoke-TCase 'C31' '私鑰檔為 DPAPI blob（非明文 PEM）' {
+    Invoke-TCase 'C31' '-Protect Dpapi 的私鑰檔為 DPAPI blob（非明文 PEM）' {
         $b = [System.IO.File]::ReadAllBytes($script:KeyA.KeyPath)
         $ascii = [System.Text.Encoding]::ASCII.GetString($b)
         Assert ($ascii -notmatch 'PRIVATE KEY') '私鑰檔含 "PRIVATE KEY" 明文字樣（未加密儲存）'
@@ -2272,6 +2347,366 @@ Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef
         Assert (-not [System.IO.File]::Exists($out)) '公鑰不存在卻仍產生了輸出檔'
         Assert ($r.StdErr -match $script:ErrPatterns['nopub']) ('訊息未指明公鑰環節：' + (Squash $r.StdErr 200))
         return ('公鑰不存在 → 直接呼叫模組函式時仍為終止性錯誤，後續語句未執行、無輸出檔；' + (Squash $r.StdErr 80))
+    }
+
+    Write-Host ''
+    Write-Host '-- 私鑰儲存格式 / 私鑰匯出 --' -ForegroundColor Cyan
+
+    # 私鑰有三種儲存格式，共用 ~\.rune\private.key 這一個路徑，由內容自動判別。
+    # 需要密碼的案例一律以模組身分執行：SecureString 無法從命令列傳給入口腳本，
+    # 而本套件的子行程一律關閉標準輸入，不能靠互動提示輸入。
+
+    Invoke-TCase 'C69' '-Protect None（預設）：未加密 PKCS#8 PEM 落地、印出未加密警告、roundtrip 位元一致' {
+        $kp = New-TestKeyPair -Name 'pnone' -ScriptPath $script:SutOpen
+        [void](Assert-NoHomeEscape -When 'C69')
+        Assert (-not $kp.Result.Failed) ('-GenerateKeys（預設 -Protect）失敗 => ' + (Squash $kp.Result.All 200))
+        Assert ($kp.HasKey) '未產生 private.key'
+        Assert ($null -ne $kp.PublicPem) '未寫出 public.pem'
+
+        $text = [System.IO.File]::ReadAllText($kp.KeyPath)
+        Assert ($text -match '^\s*-----BEGIN PRIVATE KEY-----') ('私鑰檔不是未加密 PKCS#8 PEM：' + (Squash $text 60))
+        Assert ($text -notmatch 'ENCRYPTED') '未加密模式卻寫出 ENCRYPTED PRIVATE KEY'
+
+        # 未加密警告：使用者必須被明白告知這個檔案沒有任何保護，以及後果是什麼
+        $o = $kp.Result.All
+        Assert ($o -match '未加密的 PKCS#8 PEM') ('產生時未印出未加密警告：' + (Squash $o 300))
+        Assert ($o -match '任何能讀取此檔案的人') ('警告未說明後果：' + (Squash $o 300))
+
+        # 明文 PEM 可用標準 API 獨立載入，且與落地的 public.pem 是同一把
+        $ind = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $ind.ImportFromPem($text)
+        $onDisk = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $onDisk.ImportFromPem($kp.PublicPem)
+        Assert ([Convert]::ToHexString($ind.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($onDisk.ExportSubjectPublicKeyInfo())) `
+            '明文私鑰與同時寫出的 public.pem 不是同一把'
+
+        $src = Join-Path $script:Fx 'tree'
+        $r = Invoke-KeyRoundtrip -Key $kp -Name 'pnone' -Source $src
+        $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $r.Dest) -AllowRootPrefix 'tree'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+        return ('標頭 -----BEGIN PRIVATE KEY-----、可獨立以 ImportFromPem 載入、與 public.pem 同一把；警告已印出；{0} 檔位元一致還原' -f (Get-TreeMap $src).Count)
+    }
+
+    Invoke-TCase 'C70' '-Protect Dpapi：DPAPI blob 落地、不印未加密警告、roundtrip 位元一致' {
+        $kp = New-TestKeyPair -Name 'pdpapi' -ScriptPath $script:SutOpen -Protect 'Dpapi'
+        [void](Assert-NoHomeEscape -When 'C70')
+        Assert (-not $kp.Result.Failed) ('-GenerateKeys -Protect Dpapi 失敗 => ' + (Squash $kp.Result.All 200))
+        Assert ($kp.HasKey) '未產生 private.key'
+
+        $b = [System.IO.File]::ReadAllBytes($kp.KeyPath)
+        $ascii = [System.Text.Encoding]::ASCII.GetString($b)
+        Assert ($ascii -notmatch '-----BEGIN') 'DPAPI 模式的私鑰檔含 PEM 標頭'
+        $unprotected = $null
+        try {
+            $unprotected = [System.Security.Cryptography.ProtectedData]::Unprotect($b, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        } catch { }
+        Assert ($null -ne $unprotected) 'DPAPI(CurrentUser, 無 entropy) 解不開這個私鑰檔'
+        Assert ($kp.Result.All -notmatch '任何能讀取此檔案的人') 'DPAPI 模式不應印出未加密警告'
+
+        $src = Join-Path $script:Fx 'tree'
+        $r = Invoke-KeyRoundtrip -Key $kp -Name 'pdpapi' -Source $src
+        $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $r.Dest) -AllowRootPrefix 'tree'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+        return ('{0}B 二進位、可用 DPAPI(CurrentUser) 解開、無 PEM 標頭、無未加密警告；{1} 檔位元一致還原' -f $b.Length, (Get-TreeMap $src).Count)
+    }
+
+    Invoke-TCase 'C71' '-Protect Passphrase：加密 PKCS#8 PEM 落地，密碼正確可完成 roundtrip' {
+        $sb = New-HomeSandbox -Name 'ppass'
+        $src = Join-Path $script:Fx 'tree'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'ppass.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+        $dest = New-Dir (Join-Path $script:Work 'unpack\ppass')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
+Invoke-RuneGenerateKeys -Protect Passphrase -Passphrase $pw
+'HOMEOK=' + ($HOME -eq $env:USERPROFILE)
+'KEYHEAD=' + (Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.rune\private.key') -TotalCount 1)
+Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef (Join-Path $env:USERPROFILE '.rune\public.pem')
+Invoke-RuneOpen -InFilePath $env:RUNE_OUT -DestinationPath $env:RUNE_DEST -Passphrase $pw
+'DONE=1'
+'@
+        $r = Invoke-RuneProbe -Name 'ppass' -Body $body -EnvVars ($sb.Env + @{
+                RUNE_PW = $script:PassphraseText; RUNE_SRC = $src; RUNE_OUT = $out; RUNE_DEST = $dest
+            })
+        [void](Assert-NoHomeEscape -When 'C71')
+        [void](Expect-Success $r '-Protect Passphrase roundtrip')
+        $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+        Assert ($kv['HOMEOK'] -eq 'True') '探針的家目錄未落在沙箱內'
+        Assert ($kv['KEYHEAD'] -eq '-----BEGIN ENCRYPTED PRIVATE KEY-----') ('私鑰檔不是加密 PKCS#8 PEM：' + $kv['KEYHEAD'])
+        Assert ($kv['DONE'] -eq '1') '探針未跑完'
+
+        # 由測試端獨立確認：這個 PEM 沒有密碼就載不進來，有密碼才行
+        $pem = [System.IO.File]::ReadAllText($sb.KeyPath)
+        $noPw = $false
+        try { ([System.Security.Cryptography.ECDiffieHellman]::Create()).ImportFromPem($pem) } catch { $noPw = $true }
+        Assert $noPw '加密 PEM 竟可直接以 ImportFromPem 載入（內容未真的加密）'
+        $withPw = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $withPw.ImportFromEncryptedPem($pem, $script:PassphraseText)
+        Assert ($withPw.ExportParameters($false).Curve.Oid.Value -eq '1.2.840.10045.3.1.7') '加密 PEM 解出的不是 P-256'
+
+        $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $dest) -AllowRootPrefix 'tree'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+
+        $script:KeyPassSandbox = $sb
+        $script:CtPass = $out
+        return ('標頭 -----BEGIN ENCRYPTED PRIVATE KEY-----、無密碼載不進來、有密碼解出 P-256；{0} 檔位元一致還原' -f (Get-TreeMap $src).Count)
+    }
+
+    Invoke-TCase 'C72' '加密 PKCS#8 PEM：密碼錯誤時明確報錯、不崩潰、不產生輸出' {
+        Assert ($null -ne $script:KeyPassSandbox) '前置 C71 未建立密碼保護的金鑰'
+        $dest = New-Dir (Join-Path $script:Work 'unpack\ppass_wrong')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
+try {
+    Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DEST -Passphrase $pw
+    'RESULT=NO-THROW'
+}
+catch {
+    'RESULT=THROWN'
+    'MSG=' + ($_.Exception.Message -replace '\s+', ' ')
+}
+'@
+        $r = Invoke-RuneProbe -Name 'ppass_wrong' -Body $body -EnvVars ($script:KeyPassSandbox.Env + @{
+                RUNE_PW = ($script:PassphraseText + '-wrong'); RUNE_CT = $script:CtPass; RUNE_DEST = $dest
+            })
+        Assert (-not $r.TimedOut) '子行程逾時（可能卡在互動提示）'
+        Assert (-not $r.Failed) ('密碼錯誤應是可捕捉的錯誤，不該讓行程崩潰：' + (Squash $r.All 200))
+        $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+        Assert ($kv['RESULT'] -eq 'THROWN') '密碼錯誤卻沒有報錯'
+        Assert ($kv['MSG'] -match $script:ErrPatterns['key']) ('訊息未指明私鑰環節：' + (Squash $kv['MSG'] 200))
+        Assert ($kv['MSG'] -match '密碼') ('訊息未指出密碼可能不正確：' + (Squash $kv['MSG'] 200))
+        Assert ((Get-TreeMap $dest).Count -eq 0) '密碼錯誤卻仍寫出檔案'
+        return ('密碼錯誤 → 終止性錯誤且訊息指明密碼；目的資料夾無任何檔案；msg=' + (Squash $kv['MSG'] 90))
+    }
+
+    Invoke-TCase 'C73' '非互動且未提供密碼：兩條路徑都明確失敗且不卡住' {
+        Assert ($null -ne $script:KeyPassSandbox) '前置 C71 未建立密碼保護的金鑰'
+
+        # (a) 以密碼保護的私鑰解密，未給 -Passphrase
+        $dest = New-Dir (Join-Path $script:Work 'unpack\ppass_nopw')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        $swA = [System.Diagnostics.Stopwatch]::StartNew()
+        $ra = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-Unpack', $script:CtPass, '-Destination', $dest, '-KeyFile', $script:KeyPassSandbox.KeyPath) `
+            -EnvVars $script:KeyPassSandbox.Env -Timeout 45
+        $swA.Stop()
+        $evA = Expect-Failure $ra 'key' '非互動解密未提供密碼'
+        Assert ($ra.StdErr -match '非互動') ('未說明是非互動環境所致：' + (Squash $ra.StdErr 200))
+        Assert ($ra.StdErr -match '-Passphrase') ('未指引可用 -Passphrase：' + (Squash $ra.StdErr 200))
+        Assert ((Get-TreeMap $dest).Count -eq 0) '失敗卻仍寫出檔案'
+
+        # (b) -GenerateKeys -Protect Passphrase，未給 -Passphrase
+        $sb = New-HomeSandbox -Name 'nopw'
+        $swB = [System.Diagnostics.Stopwatch]::StartNew()
+        $rb = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-GenerateKeys', '-Protect', 'Passphrase') `
+            -EnvVars $sb.Env -WorkDir $sb.Path -Timeout 45
+        $swB.Stop()
+        [void](Assert-NoHomeEscape -When 'C73')
+        $evB = Expect-Failure $rb 'key' '非互動產生金鑰未提供密碼'
+        Assert ($rb.StdErr -match '非互動') ('未說明是非互動環境所致：' + (Squash $rb.StdErr 200))
+        Assert (-not [System.IO.File]::Exists($sb.KeyPath)) '被拒絕卻仍產生了 private.key'
+        Assert (-not [System.IO.File]::Exists($sb.PubPath)) '被拒絕卻仍產生了 public.pem'
+
+        # 逾時上限 45s 只保證不會掛死整套；這裡再要求「很快就結束」，證明是主動拒絕而非等待輸入
+        Assert ($swA.ElapsedMilliseconds -lt 30000 -and $swB.ElapsedMilliseconds -lt 30000) `
+        ('結束太慢，疑似曾停在等待輸入：{0}ms / {1}ms' -f $swA.ElapsedMilliseconds, $swB.ElapsedMilliseconds)
+        return ('-Unpack {0}ms、-GenerateKeys {1}ms 均主動拒絕（逾時上限 45s 未觸發），未留下任何檔案；{2}' -f `
+                $swA.ElapsedMilliseconds, $swB.ElapsedMilliseconds, (Squash $evA 60))
+    }
+
+    Invoke-TCase 'C74' '既有 DPAPI 私鑰相容性：由測試獨立構造的 DPAPI blob 仍可解密' {
+        # 不經受測物產生金鑰：直接以 .NET 產生 P-256、輸出 PKCS#8、用
+        # ProtectedData.Protect(CurrentUser, entropy=null) 保護後落地。這就是既有
+        # ~\.rune\private.key 的位元組格式，本案要求它在改動後仍然讀得回來。
+        $dir = New-Dir (Join-Path $script:Work 'legacykey')
+        $keyPath = Join-Path $dir 'private.key'
+        $pubPath = Join-Path $dir 'public.pem'
+        $ec = [System.Security.Cryptography.ECDiffieHellman]::Create([System.Security.Cryptography.ECCurve+NamedCurves]::nistP256)
+        $pkcs8 = $ec.ExportPkcs8PrivateKey()
+        $blob = [System.Security.Cryptography.ProtectedData]::Protect(
+            $pkcs8, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        [System.IO.File]::WriteAllBytes($keyPath, $blob)
+        [System.IO.File]::WriteAllText($pubPath, $ec.ExportSubjectPublicKeyInfoPem(), $script:Utf8NoBom)
+
+        $src = Join-Path $script:Fx 'wild'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'legacy.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+        $dest = New-Dir (Join-Path $script:Work 'unpack\legacy')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutSeal `
+                    -Arguments @('-Pack', (Join-Path $src '*.txt'), '-OutFile', $out, '-PublicKey', $pubPath) `
+                    -EnvVars $script:KeyA.Sandbox.Env) 'Pack(獨立構造的 DPAPI 金鑰)')
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen `
+                    -Arguments @('-Unpack', $out, '-Destination', $dest, '-KeyFile', $keyPath) `
+                    -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(獨立構造的 DPAPI 金鑰)')
+        $cmp = Compare-Tree -Expected (Get-WildExpectedMap) -Actual (Get-TreeMap $dest) -AllowRootPrefix 'wild'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+
+        # 同一把金鑰也要能導出公鑰（-ExportPublicKey 走的是同一條私鑰載入路徑）
+        $rp = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-ExportPublicKey', '-KeyFile', $keyPath) -EnvVars $script:KeyA.Sandbox.Env
+        [void](Expect-Success $rp 'ExportPublicKey(獨立構造的 DPAPI 金鑰)')
+        $digest = [System.Security.Cryptography.SHA256]::HashData($ec.ExportSubjectPublicKeyInfo())
+        $hex = [Convert]::ToHexString($digest, 0, 16)
+        $expectFp = ((0..7) | ForEach-Object { $hex.Substring($_ * 4, 4) }) -join '-'
+        Assert ($rp.All -match [regex]::Escape($expectFp)) ('導出的指紋與獨立重算不符：' + (Squash $rp.All 200))
+        $script:LegacyDpapiKey = $keyPath
+        return ('非受測物產生的 DPAPI blob（{0}B）可解密 3 檔且位元一致，指紋 RUNE-KEY {1} 與獨立重算相符' -f $blob.Length, $expectFp)
+    }
+
+    Invoke-TCase 'C75' '-ExportPrivateKey：從 DPAPI 私鑰匯出未加密 PKCS#8 PEM，可用來解開既有密文' {
+        $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'from-dpapi.pem'
+        if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-ExportPrivateKey', '-OutFile', $outKey, '-KeyFile', $script:KeyA.KeyPath, '-Force') `
+            -EnvVars $script:KeyA.Sandbox.Env
+        [void](Expect-Success $r '-ExportPrivateKey(DPAPI → 明文 PEM)')
+        Assert ([System.IO.File]::Exists($outKey)) '未產生匯出檔'
+        $text = [System.IO.File]::ReadAllText($outKey)
+        Assert ($text -match '^\s*-----BEGIN PRIVATE KEY-----') ('匯出檔不是未加密 PKCS#8 PEM：' + (Squash $text 60))
+        Assert ($r.All -match '任何能讀取此檔案的人') ('匯出未加密檔卻未印出警告：' + (Squash $r.All 300))
+
+        # 匯出的是同一把金鑰：指紋必須與金鑰 A 的公鑰一致
+        $digest = [System.Security.Cryptography.SHA256]::HashData($script:PubSpkiA)
+        $hex = [Convert]::ToHexString($digest, 0, 16)
+        $expectFp = ((0..7) | ForEach-Object { $hex.Substring($_ * 4, 4) }) -join '-'
+        Assert ($r.All -match [regex]::Escape($expectFp)) ('匯出時印出的指紋與金鑰 A 不符：' + (Squash $r.All 200))
+        $ind = [System.Security.Cryptography.ECDiffieHellman]::Create()
+        $ind.ImportFromPem($text)
+        Assert ([Convert]::ToHexString($ind.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
+            '匯出檔的公鑰與金鑰 A 不是同一把'
+
+        # 關鍵：用匯出檔解開「匯出之前就已經存在」的密文（C02 產生）
+        $dest = New-Dir (Join-Path $script:Work 'unpack\exported_plain')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen `
+                    -Arguments @('-Unpack', $script:CtWild, '-Destination', $dest, '-KeyFile', $outKey) `
+                    -EnvVars $script:KeyA.Sandbox.Env) 'Unpack(匯出的明文 PEM)')
+        $cmp = Compare-Tree -Expected (Get-WildExpectedMap) -Actual (Get-TreeMap $dest) -AllowRootPrefix 'wild'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+
+        $script:ExportedPlainKey = $outKey
+        return ('DPAPI 私鑰 → 未加密 PKCS#8 PEM（{0}B），指紋 RUNE-KEY {1} 不變，且可解開匯出前產生的密文（3 檔位元一致）' -f `
+            (Get-Item -LiteralPath $outKey).Length, $expectFp)
+    }
+
+    Invoke-TCase 'C76' '-ExportPrivateKey -Protect Passphrase：匯出檔為加密 PKCS#8 PEM，需密碼才能使用' {
+        $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'from-dpapi-enc.pem'
+        if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+        $destBad = New-Dir (Join-Path $script:Work 'unpack\exported_enc_nopw')
+        $destOk = New-Dir (Join-Path $script:Work 'unpack\exported_enc_ok')
+        foreach ($d in @($destBad, $destOk)) { Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force }
+
+        $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
+Invoke-RuneExportPrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force
+'HEAD=' + (Get-Content -LiteralPath $env:RUNE_OUTKEY -TotalCount 1)
+try {
+    Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DESTBAD -KeyFilePath $env:RUNE_OUTKEY
+    'NOPW=NO-THROW'
+}
+catch {
+    'NOPW=THROWN'
+    'NOPWMSG=' + ($_.Exception.Message -replace '\s+', ' ')
+}
+Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DESTOK -KeyFilePath $env:RUNE_OUTKEY -Passphrase $pw
+'DONE=1'
+'@
+        $r = Invoke-RuneProbe -Name 'exportenc' -Body $body -EnvVars ($script:KeyA.Sandbox.Env + @{
+                RUNE_PW = $script:PassphraseText; RUNE_OUTKEY = $outKey; RUNE_SRCKEY = $script:KeyA.KeyPath
+                RUNE_CT = $script:CtWild; RUNE_DESTBAD = $destBad; RUNE_DESTOK = $destOk
+            })
+        [void](Expect-Success $r '-ExportPrivateKey(DPAPI → 加密 PEM)')
+        $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+        Assert ($kv['HEAD'] -eq '-----BEGIN ENCRYPTED PRIVATE KEY-----') ('匯出檔不是加密 PKCS#8 PEM：' + $kv['HEAD'])
+        Assert ($kv['NOPW'] -eq 'THROWN') '加密的匯出檔在未提供密碼時竟可直接使用'
+        Assert ($kv['NOPWMSG'] -match '非互動') ('未說明是非互動環境所致：' + (Squash $kv['NOPWMSG'] 200))
+        Assert ((Get-TreeMap $destBad).Count -eq 0) '未提供密碼卻仍寫出檔案'
+        Assert ($kv['DONE'] -eq '1') '探針未跑完'
+        $cmp = Compare-Tree -Expected (Get-WildExpectedMap) -Actual (Get-TreeMap $destOk) -AllowRootPrefix 'wild'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+
+        $script:ExportedEncKey = $outKey
+        return ('DPAPI 私鑰 → 加密 PKCS#8 PEM；無密碼被拒（無檔案產出），有密碼則 3 檔位元一致還原')
+    }
+
+    Invoke-TCase 'C77' '格式自動偵測：同一把私鑰的三種儲存格式對同一份密文結果相同' {
+        Assert ($null -ne $script:ExportedPlainKey -and $null -ne $script:ExportedEncKey) '前置 C75／C76 未產生匯出檔'
+        # 三個檔案的內容格式必須真的不同，否則這一案等於測了三次同一件事
+        $fmt = @{}
+        foreach ($p in @(@{ N = 'Dpapi'; P = $script:KeyA.KeyPath }, @{ N = 'PlainPem'; P = $script:ExportedPlainKey }, @{ N = 'EncPem'; P = $script:ExportedEncKey })) {
+            $head = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($p.P))
+            $fmt[$p.N] = if ($head -match '-----BEGIN ENCRYPTED PRIVATE KEY-----') { 'EncPem' }
+            elseif ($head -match '-----BEGIN PRIVATE KEY-----') { 'PlainPem' } else { 'Dpapi' }
+            Assert ($fmt[$p.N] -eq $p.N) ('{0} 這一份的實際格式是 {1}' -f $p.N, $fmt[$p.N])
+        }
+
+        $maps = @{}
+        foreach ($p in @(@{ N = 'dpapi'; P = $script:KeyA.KeyPath }, @{ N = 'plain'; P = $script:ExportedPlainKey })) {
+            $d = New-Dir (Join-Path $script:Work ('unpack\detect_' + $p.N))
+            Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+            [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutOpen `
+                        -Arguments @('-Unpack', $script:CtWild, '-Destination', $d, '-KeyFile', $p.P) `
+                        -EnvVars $script:KeyA.Sandbox.Env) ('Unpack(' + $p.N + ')'))
+            $maps[$p.N] = Get-TreeMap $d
+        }
+
+        $encDest = New-Dir (Join-Path $script:Work 'unpack\detect_enc')
+        Get-ChildItem -LiteralPath $encDest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
+Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DEST -KeyFilePath $env:RUNE_KEY -Passphrase $pw
+'DONE=1'
+'@
+        $r = Invoke-RuneProbe -Name 'detectenc' -Body $body -EnvVars ($script:KeyA.Sandbox.Env + @{
+                RUNE_PW = $script:PassphraseText; RUNE_CT = $script:CtWild; RUNE_DEST = $encDest; RUNE_KEY = $script:ExportedEncKey
+            })
+        [void](Expect-Success $r 'Unpack(加密 PEM)')
+        $maps['enc'] = Get-TreeMap $encDest
+
+        $expected = Get-WildExpectedMap
+        foreach ($k in @('dpapi', 'plain', 'enc')) {
+            $c = Compare-Tree -Expected $expected -Actual $maps[$k] -AllowRootPrefix 'wild'
+            Assert ($null -eq $c.Diff) ("$k 格式的還原結果不符：" + $c.Diff)
+        }
+        return ('同一份密文以 DPAPI／未加密 PEM／加密 PEM 三種私鑰檔解出的 3 檔內容完全相同；格式僅由檔案內容判別，皆未指定任何格式參數')
+    }
+
+    Invoke-TCase 'C78' '-ExportPrivateKey：-OutFile 已存在且未加 -Force → 拒絕，原檔一個位元都不變' {
+        Assert ($null -ne $script:ExportedPlainKey) '前置 C75 未產生匯出檔'
+        $before = Get-Sha $script:ExportedPlainKey
+        $lenBefore = (Get-Item -LiteralPath $script:ExportedPlainKey).Length
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-ExportPrivateKey', '-OutFile', $script:ExportedPlainKey, '-KeyFile', $script:KeyA.KeyPath) `
+            -EnvVars $script:KeyA.Sandbox.Env -Timeout 45
+        $ev = Expect-Failure $r 'exists' '-ExportPrivateKey 輸出檔已存在'
+        Assert ((Get-Sha $script:ExportedPlainKey) -eq $before) '既有的匯出檔被覆蓋了'
+        Assert ((Get-Item -LiteralPath $script:ExportedPlainKey).Length -eq $lenBefore) '既有的匯出檔長度改變了'
+        Assert ($r.StdErr -match '-Force') ('拒絕訊息未指引可用 -Force：' + (Squash $r.StdErr 200))
+        return ("$ev；原檔 SHA-256 與長度皆未變")
+    }
+
+    Invoke-TCase 'C79' '-ExportPrivateKey：非互動環境未加 -Force → 拒絕確認，且不產生輸出檔' {
+        $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'noforce.pem'
+        if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-ExportPrivateKey', '-OutFile', $outKey, '-KeyFile', $script:KeyA.KeyPath) `
+            -EnvVars $script:KeyA.Sandbox.Env -Timeout 45
+        Assert (-not $r.TimedOut) '子行程逾時（可能卡在確認提示）'
+        $ev = Expect-Failure $r 'key' '-ExportPrivateKey 非互動且無 -Force'
+        Assert ($r.StdErr -match '非互動') ('未說明是非互動環境所致：' + (Squash $r.StdErr 200))
+        Assert ($r.StdErr -match '-Force') ('未指引可用 -Force：' + (Squash $r.StdErr 200))
+        Assert (-not [System.IO.File]::Exists($outKey)) '被拒絕卻仍產生了匯出檔'
+        return ("$ev；未產生任何檔案")
     }
 
     Invoke-TCase 'C40' '原始受測腳本（seal + open）自始至終未被修改' {

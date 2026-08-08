@@ -1,15 +1,32 @@
-﻿# ==========================================================================
-# 區塊：私鑰載入（-Unpack 用；DPAPI CurrentUser 保護的 Pkcs8 私鑰 blob）
+# ==========================================================================
+# 區塊：私鑰載入（-Unpack / -ExportPublicKey / -ExportPrivateKey 用）
 # ==========================================================================
 
 function Get-RunePrivateKey {
     <#
-        讀取 ~\.rune\private.key（或 -KeyFile 指定路徑），該檔內容是用
-        DPAPI（CurrentUser scope）保護過的 ECDH P-256 Pkcs8 私鑰位元組。
-        只有「同一台機器、同一個 Windows 帳號」才解得開；否則視為
-        「私鑰讀不到／DPAPI 解保護失敗」。
+        讀取 ~\.rune\private.key（或 -KeyFilePath 指定的路徑），回傳可用的
+        ECDiffieHellman 物件。
+
+        儲存格式由檔案內容判定（見 Get-RunePrivateKeyFormat），呼叫端不需要、也無法
+        指定格式：
+
+          未加密的 PKCS#8 PEM        直接匯入。
+          密碼保護的 PKCS#8 PEM      需要密碼；未以 -Passphrase 傳入時，於互動環境
+                                     詢問，非互動環境則擲回錯誤。
+          DPAPI（CurrentUser）位元組 只有「同一台機器、同一個 Windows 帳號」解得開，
+                                     否則視為私鑰讀不到。
+
+        -NoPrompt 供「讀不到就算了」的旁路使用（例如覆蓋確認時顯示現有指紋）：此時
+        密碼保護的私鑰在未提供密碼的情況下直接擲回錯誤，不會插入一個使用者沒有預期的
+        密碼提示。
+
+        匯入後一律驗證曲線為 P-256，不符即拒絕。
     #>
-    param([string] $KeyFilePath)
+    param(
+        [string] $KeyFilePath,
+        [securestring] $Passphrase,
+        [switch] $NoPrompt
+    )
 
     if ([string]::IsNullOrWhiteSpace($KeyFilePath)) {
         $KeyFilePath = $Script:DefaultKeyFile
@@ -19,25 +36,57 @@ function Get-RunePrivateKey {
         throw "私鑰檔案讀取失敗：找不到 $KeyFilePath（請確認路徑，或先以 -GenerateKeys 產生金鑰）"
     }
 
-    $protectedBytes = [System.IO.File]::ReadAllBytes($KeyFilePath)
-
-    $pkcs8Bytes = $null
-    try {
-        $pkcs8Bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-            $protectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-    }
-    catch {
-        throw "私鑰讀不到／DPAPI 解保護失敗（是否為非本機、非本 Windows 帳號產生的私鑰檔，或檔案已損壞？）：$($_.Exception.Message)"
-    }
+    $fileBytes = [System.IO.File]::ReadAllBytes($KeyFilePath)
+    $format = Get-RunePrivateKeyFormat -Content $fileBytes
 
     $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
     try {
-        $bytesRead = 0
-        try {
-            $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead)
-        }
-        catch {
-            throw "私鑰讀不到／DPAPI 解保護失敗：DPAPI 解密後的私鑰內容格式無效（$($_.Exception.Message)）"
+        switch ($format) {
+            'None' {
+                $pem = [System.Text.Encoding]::UTF8.GetString($fileBytes)
+                try {
+                    $ecdh.ImportFromPem($pem)
+                }
+                catch {
+                    throw "私鑰檔案讀取失敗：未加密的 PKCS#8 PEM 內容無效（$($_.Exception.Message)）"
+                }
+            }
+            'Passphrase' {
+                $pem = [System.Text.Encoding]::UTF8.GetString($fileBytes)
+                $secret = Read-RunePassphrase -Passphrase $Passphrase -NoPrompt:$NoPrompt `
+                    -Prompt "請輸入 $KeyFilePath 的密碼"
+                try {
+                    $ecdh.ImportFromEncryptedPem($pem, (ConvertFrom-RuneSecureString -Secure $secret))
+                }
+                catch {
+                    throw "私鑰檔案讀取失敗：無法以提供的密碼解開密碼保護的 PKCS#8 PEM（密碼可能不正確，或檔案已損壞）"
+                }
+            }
+            default {
+                $pkcs8Bytes = $null
+                try {
+                    try {
+                        $pkcs8Bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                            $fileBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+                    }
+                    catch {
+                        throw "私鑰讀不到／DPAPI 解保護失敗（是否為非本機、非本 Windows 帳號產生的私鑰檔，或檔案已損壞？）：$($_.Exception.Message)"
+                    }
+
+                    $bytesRead = 0
+                    try {
+                        $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead)
+                    }
+                    catch {
+                        throw "私鑰讀不到／DPAPI 解保護失敗：DPAPI 解密後的私鑰內容格式無效（$($_.Exception.Message)）"
+                    }
+                }
+                finally {
+                    if ($pkcs8Bytes) {
+                        [Array]::Clear($pkcs8Bytes, 0, $pkcs8Bytes.Length)
+                    }
+                }
+            }
         }
 
         $curveOid = $ecdh.ExportParameters($false).Curve.Oid.Value
@@ -48,11 +97,6 @@ function Get-RunePrivateKey {
     catch {
         $ecdh.Dispose()
         throw
-    }
-    finally {
-        if ($pkcs8Bytes) {
-            [Array]::Clear($pkcs8Bytes, 0, $pkcs8Bytes.Length)
-        }
     }
 
     return $ecdh
