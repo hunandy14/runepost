@@ -1735,7 +1735,11 @@ Invoke-TCase 'C12' '竄改 base64 一字元 → 報內容損壞（tag 驗證）'
     $lines[$li] = $line.Substring(0, $ci) + $new + $line.Substring($ci + 1)
     [System.IO.File]::WriteAllText($t, (($lines -join "`r`n") + "`r`n"), $script:Utf8NoBom)
     $r = Invoke-UnpackOnly -Txt $t -KeyFile (Get-Fixture 'KeyA').KeyPath -DestName 'tamper_b64'
-    $ev = Expect-OpenRefused -Res $r -Destination (Get-UnpackDest 'tamper_b64') -Category 'tag' -What '竄改密文'
+    # 訊息必須點名「被竄改」，不能只說「損壞」：GCM 認證失敗與下游 Brotli 解壓
+    # 失敗都會產生「損壞」字樣，只比對環節分類分不出兩者——完整性檢查若被拿掉，
+    # 錯誤會退化成下游的解壓失敗，使用者也就不會察覺這是遭竄改而非傳輸出錯。
+    $ev = Expect-OpenRefused -Res $r -Destination (Get-UnpackDest 'tamper_b64') -Category 'tag' `
+        -What '竄改密文' -Expect @('tampered')
     return ("第 $li 行第 $ci 字元 '$old'→'$new'；$ev")
 }
 
@@ -2262,14 +2266,17 @@ Invoke-TCase 'C36' '0 byte 檔單獨打包 roundtrip' -Tier Full -Needs @('Fx', 
 function Test-ZipSlip {
     param([string]$EntryName, [string]$Tag, [string]$LeakName, [switch]$DirEntry, [switch]$RequireRefuse)
     Assert-KdfAvailable
-    $root = New-Dir (Join-Path $script:Work "unpack\zipslip_$Tag")
+    # 目錄名稱刻意不含 "slip" 之類的字樣：受測物的解包錯誤訊息會把目的路徑一併
+    # 印出來，路徑裡若出現 zipslip，stage.unsafe 這條樣式就會被路徑本身命中，
+    # 「訊息必須指明不安全的封存路徑」這條斷言等於自動成立、測不到東西。
+    $root = New-Dir (Join-Path $script:Work "unpack\pathcheck_$Tag")
     $dest = Clear-Dir (Join-Path $root 'inner')
     $outside = Join-Path $root $LeakName
     if ([System.IO.File]::Exists($outside)) { [System.IO.File]::Delete($outside) }
     if ([System.IO.Directory]::Exists($outside)) { [System.IO.Directory]::Delete($outside, $true) }
 
     $zip = if ($DirEntry) { New-ZipWithDirEntry -EntryName $EntryName } else { New-ZipWithEntry -EntryName $EntryName }
-    $t = New-ForgedRune -ZipBytes $zip -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) "zipslip_$Tag.txt")
+    $t = New-ForgedRune -ZipBytes $zip -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) "pathcheck_$Tag.txt")
     $r = Invoke-Open -Unpack $t -Destination $dest -KeyFile (Get-Fixture 'KeyA').KeyPath
 
     $leakedFile = [System.IO.File]::Exists($outside)
@@ -2291,7 +2298,9 @@ function Test-ZipSlip {
 }
 
 Invoke-TCase 'C37' '解包不得逸出 Destination（zip 路徑安全）' -Tier Core -Needs @('KdfInfo', 'KeyA') {
-    Test-ZipSlip -EntryName '../escaped.txt' -Tag 'fwd' -LeakName 'escaped.txt'
+    # 解包先落在 Destination 底下的暫存資料夾，單層 ../ 只會退到 Destination 本身；
+    # 因此「有沒有逸出」不足以判定，必須同時要求以不安全路徑明確拒絕。
+    Test-ZipSlip -EntryName '../escaped.txt' -Tag 'fwd' -LeakName 'escaped.txt' -RequireRefuse
 }
 
 Invoke-TCase 'C41' 'zip-slip 變體：entry 名用反斜線 ..\ 不得逸出 Destination' -Tier Core -Needs @('KdfInfo', 'KeyA') {
