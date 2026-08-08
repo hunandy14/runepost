@@ -1562,7 +1562,7 @@ Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem，且與 -GenerateKeys �
 Write-Host ''
 Write-Host '-- Roundtrip --' -ForegroundColor Cyan
 
-Invoke-TCase 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）' -Tier Core -Needs @('CtSingle') {
+Invoke-TCase 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）' -Tier Full -Needs @('CtSingle') {
     $ct = Get-Fixture 'CtSingle'
     $src = $ct.Source
     [void](Assert-UnpackMatches -Txt $ct.Out -KeyFile (Get-Fixture 'KeyA').KeyPath -DestName 'single' `
@@ -1570,7 +1570,7 @@ Invoke-TCase 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）
     return ('1 檔位元完全一致；SHA={0}…；容器 {1}B' -f (Get-Sha $src).Substring(0, 12), (Get-Item -LiteralPath $ct.Out).Length)
 }
 
-Invoke-TCase 'C02' 'wildcard（含中文檔名）roundtrip 且不遞迴' -Tier Core -Needs @('CtWild') {
+Invoke-TCase 'C02' 'wildcard（含中文檔名）roundtrip 且不遞迴' -Tier Full -Needs @('CtWild') {
     $ct = Get-Fixture 'CtWild'
     $c = Assert-UnpackMatches -Txt $ct.Out -KeyFile (Get-Fixture 'KeyA').KeyPath -DestName 'wild' `
         -Expected (Get-WildExpectedMap) -AllowRootPrefix 'wild' -What 'Unpack(wild)'
@@ -2167,7 +2167,7 @@ Invoke-TCase 'C58' '-ExportPublicKey 可從既有私鑰重建 public.pem，指�
     }
 }
 
-Invoke-TCase 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' -Tier Core -Needs @('Fx', 'KeyA', 'KeyB') {
+Invoke-TCase 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' -Tier Full -Needs @('Fx', 'KeyA', 'KeyB') {
     $a = Get-Fixture 'KeyA'; $b = Get-Fixture 'KeyB'
     Assert ($null -ne $b.PublicPem) '前置 P5 未取得金鑰 B 的公鑰'
     $sb = New-HomeSandbox -Name 'swap'
