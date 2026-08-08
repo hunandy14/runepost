@@ -9,8 +9,12 @@ function New-RuneKeyPair {
           Passphrase  密碼保護的 PKCS#8 PEM。可備份，還原時需要密碼；未以 -Passphrase
                       傳入時於互動環境詢問。
           Dpapi       DPAPI（CurrentUser）位元組。僅本機本帳號可解，無法備份。
+
+        回傳 Rune.KeyPair 物件；使用者在覆蓋確認時選擇不繼續則不回傳任何東西，
+        呼叫端據此判斷是否被取消。呈現由呼叫端負責。
     #>
     [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [ValidateSet('None', 'Passphrase', 'Dpapi')]
         [string] $Protect = 'None',
@@ -23,7 +27,6 @@ function New-RuneKeyPair {
     if ($keyExists) {
         $backupPlan = Get-RuneKeyBackupPaths
         if (-not (Confirm-RuneKeyOverwrite -Force:$Force -BackupPlan $backupPlan)) {
-            Write-Host '已取消，未變更任何檔案。'
             return
         }
     }
@@ -74,21 +77,22 @@ function New-RuneKeyPair {
         $ecdh.Dispose()
     }
 
-    # 保護方式寫進標題，也就是成功輸出的第一行，且走一般輸出串流：警告串流在輸出被
-    # 重新導向時可能被丟棄，使用者不該因此不知道自己手上這把私鑰是不是明文。
-    $keyNote = Get-RunePrivateKeyProtectNote -Protect $Protect
-    $title = "已產生 ECDH P-256 金鑰對（私鑰保護方式：$keyNote）"
-    if ($backupPlan) {
-        Write-RuneKeySummary -Title $title -KeyFilePath $Script:DefaultKeyFile `
-            -KeyFileNote $keyNote -PublicKeyFilePath $Script:DefaultPublicKeyFile `
-            -SpkiDer $spkiDer -BackupKeyFilePath $backupPlan.KeyBackup
-    }
-    else {
-        Write-RuneKeySummary -Title $title -KeyFilePath $Script:DefaultKeyFile `
-            -KeyFileNote $keyNote -PublicKeyFilePath $Script:DefaultPublicKeyFile -SpkiDer $spkiDer
-    }
-
     if ($Protect -eq 'None') {
         Write-RunePlainKeyWarning -KeyFilePath $Script:DefaultKeyFile
+    }
+
+    # 公鑰備份只有在舊 public.pem 真的存在時才會產生，因此以落地結果為準，
+    # 不直接照抄備份計畫裡的路徑。
+    $backupPubFile = if ($backupPlan -and (Test-Path -LiteralPath $backupPlan.PubBackup)) { $backupPlan.PubBackup } else { $null }
+
+    return [pscustomobject]@{
+        PSTypeName          = 'Rune.KeyPair'
+        Protect             = $Protect
+        ProtectNote         = (Get-RunePrivateKeyProtectNote -Protect $Protect)
+        KeyFile             = $Script:DefaultKeyFile
+        PublicKeyFile       = $Script:DefaultPublicKeyFile
+        Fingerprint         = (Get-RuneKeyFingerprint -SpkiDer $spkiDer)
+        BackupKeyFile       = $(if ($backupPlan) { $backupPlan.KeyBackup } else { $null })
+        BackupPublicKeyFile = $backupPubFile
     }
 }

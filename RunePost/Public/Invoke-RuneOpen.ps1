@@ -3,7 +3,12 @@
 # ==========================================================================
 
 function Invoke-RuneOpen {
+    <#
+        Base64 解碼 → AES-256-GCM 解密 → Brotli 解壓 → ZIP 解包，回傳
+        Rune.OpenResult 物件（目的資料夾與還原檔數），呈現由呼叫端負責。
+    #>
     [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [string] $InFilePath,
         [string] $DestinationPath,
@@ -78,6 +83,7 @@ function Invoke-RuneOpen {
     # 先解到 Destination 底下的暫存資料夾，全部成功後才搬到正式位置；
     # 任何一步失敗都清掉暫存資料夾並報錯，Destination 不留半成品。
     $tmpDir = Join-Path -Path $DestinationPath -ChildPath (".rune-tmp-" + [Guid]::NewGuid().ToString('N'))
+    $restoredFileCount = 0
     try {
         try {
             Expand-RuneZip -ZipBytes $zipBytes -Destination $tmpDir
@@ -90,6 +96,10 @@ function Invoke-RuneOpen {
         catch {
             throw "ZIP 解包失敗：封裝格式錯誤或已損壞（$($_.Exception.Message)）"
         }
+
+        # 還原檔數在搬移前於暫存資料夾清點：搬移後 Destination 可能本來就有其他
+        # 無關內容，屆時數出來的不會是「這一份密文還原了幾個檔」。
+        $restoredFileCount = @(Get-ChildItem -LiteralPath $tmpDir -Recurse -File -Force).Count
 
         try {
             Move-RuneExtractedTree -SourceDir $tmpDir -DestDir $DestinationPath
@@ -104,5 +114,10 @@ function Invoke-RuneOpen {
         }
     }
 
-    Write-Host "解密完成，檔案已還原至：$((Get-Item -LiteralPath $DestinationPath).FullName)"
+    return [pscustomobject]@{
+        PSTypeName  = 'Rune.OpenResult'
+        InFile      = [System.IO.Path]::GetFullPath($InFilePath)
+        Destination = (Get-Item -LiteralPath $DestinationPath).FullName
+        FileCount   = $restoredFileCount
+    }
 }

@@ -16,8 +16,12 @@ function Export-RunePrivateKey {
                          分開，因為兩者是不同的密碼：來源與備份可以各自設定，
                          也才能在非互動環境下同時指定。
           -Force         略過確認提示，並允許覆蓋已存在的 -OutFilePath。
+
+        回傳 Rune.PrivateKeyExport 物件；使用者在確認提示選擇不繼續則不回傳任何
+        東西，呼叫端據此判斷是否被取消。呈現由呼叫端負責。
     #>
     [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
         [string] $OutFilePath,
@@ -53,7 +57,6 @@ function Export-RunePrivateKey {
     }
 
     if (-not (Confirm-RunePrivateKeyExport -Force:$Force -SourceKeyPath $sourcePath -OutFilePath $outFull -Protect $Protect)) {
-        Write-Host '已取消，未變更任何檔案。'
         return
     }
 
@@ -88,14 +91,16 @@ function Export-RunePrivateKey {
         }
     }
 
-    # 匯出格式放在第一行、走一般輸出串流，理由同 -GenerateKeys 的成功摘要。
-    Write-Host "已匯出私鑰（格式：$(Get-RunePrivateKeyProtectNote -Protect $Protect)）"
-    Write-Host "  來源  $sourcePath"
-    Write-Host "  輸出  $outFull"
-    Write-Host ('  指紋  RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $spkiDer))
-    Write-Host "還原方式：rune-open.ps1 -Unpack <密文檔> -Destination <目的資料夾> -KeyFile $outFull"
-
     if ($Protect -eq 'None') {
         Write-RunePlainKeyWarning -KeyFilePath $outFull
+    }
+
+    return [pscustomobject]@{
+        PSTypeName    = 'Rune.PrivateKeyExport'
+        Protect       = $Protect
+        ProtectNote   = (Get-RunePrivateKeyProtectNote -Protect $Protect)
+        SourceKeyFile = $sourcePath
+        OutFile       = $outFull
+        Fingerprint   = (Get-RuneKeyFingerprint -SpkiDer $spkiDer)
     }
 }
