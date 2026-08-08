@@ -5,12 +5,17 @@
 
 .DESCRIPTION
     本腳本只依據凍結規格撰寫，未讀取任何受測實作原始碼。
-    對 dist\rune-seal.ps1（加密端）與 dist\rune-open.ps1（解密端 + 金鑰管理）
-    兩個產物跑一套完整案例；-Pack 相關案例一律對 rune-seal.ps1 執行，
-    -Unpack / -GenerateKeys / -ExportPublicKey 相關案例一律對 rune-open.ps1 執行。
+    -Pack 相關案例一律對 rune-seal.ps1 執行，-Unpack / -GenerateKeys /
+    -ExportPublicKey 相關案例一律對 rune-open.ps1 執行。
+
+    【雙軌】模組化重構期間，同一批案例會跑兩遍：
+      軌 dist —— 舊架構產物 dist\rune-seal.ps1 / dist\rune-open.ps1（對照組）
+      軌 mod  —— 新架構入口腳本 <repo>\rune-seal.ps1 / <repo>\rune-open.ps1（受測組）
+    兩軌各自必須全綠，且同一案號在兩軌的結果必須逐格相同（含 SKIP/INFO 分佈），
+    否則以 exit 1 結束。等價確認並移除 dist/ 之後，本檔會拆回單軌。
 
 .PARAMETER RepoRoot
-    repo 根目錄（內含 dist\rune-seal.ps1 / dist\rune-open.ps1）。
+    repo 根目錄（內含 dist\rune-*.ps1 與根目錄的 rune-*.ps1）。
 
 .EXAMPLE
     pwsh -File .\verify.ps1 -RepoRoot Z:\path\to\repo
@@ -49,8 +54,34 @@ $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $script:Utf8Bom = [System.Text.UTF8Encoding]::new($true)
 
 $script:RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-$script:SealScript = Join-Path $script:RepoRoot 'dist\rune-seal.ps1'
-$script:OpenScript = Join-Path $script:RepoRoot 'dist\rune-open.ps1'
+
+# ------------------------------------------------------------------------------
+# 雙軌：同一批案例分別對「舊 dist/ 產物」與「新模組入口腳本」各跑一遍。
+#
+#   dist 軌 = 對照組。dist/rune-seal.ps1 / dist/rune-open.ps1 是由 build.ps1 自
+#             src/ 組裝、已被本套件驗證過的已知良品。
+#   mod  軌 = 受測組。repo 根目錄的兩支薄入口腳本，body 只有
+#             Import-Module .\RunePost 之後呼叫對應函式。
+#
+# 兩軌都必須全綠。若 mod 紅而 dist 綠，問題一定出在「fragment → 模組」的搬移，
+# 而不是實作本身——這就是把對照組留在原地的全部理由。等價確認後才會在下一顆
+# commit 移除 build.ps1 / dist/ / src/，並把本檔拆回單軌。
+# ------------------------------------------------------------------------------
+$script:Tracks = @(
+    [pscustomobject]@{
+        Name = 'dist'
+        Desc = '舊架構產物（build.ps1 組裝的單檔，對照組／已知良品）'
+        Seal = Join-Path $script:RepoRoot 'dist\rune-seal.ps1'
+        Open = Join-Path $script:RepoRoot 'dist\rune-open.ps1'
+    }
+    [pscustomobject]@{
+        Name = 'mod'
+        Desc = '新架構入口腳本（薄殼 + RunePost 模組，受測組）'
+        Seal = Join-Path $script:RepoRoot 'rune-seal.ps1'
+        Open = Join-Path $script:RepoRoot 'rune-open.ps1'
+    }
+)
+$script:CurrentTrack = ''
 
 function Write-Log {
     param([string]$Text)
@@ -98,16 +129,17 @@ function Invoke-Case {
     }
     $sw.Stop()
     $script:Results.Add([pscustomobject]@{
+            Track    = $script:CurrentTrack
             No       = $Id
             Case     = $Name
             Result   = $status
             Evidence = $evidence
             Ms       = [int]$sw.ElapsedMilliseconds
         })
-    Write-Log ("{0} {1} [{2}] {3}" -f $Id, $Name, $status, (Squash $evidence 400))
+    Write-Log ("[{0}] {1} {2} [{3}] {4}" -f $script:CurrentTrack, $Id, $Name, $status, (Squash $evidence 400))
 
     $color = switch ($status) { 'PASS' { 'Green' } 'FAIL' { 'Red' } 'SKIP' { 'DarkYellow' } default { 'Cyan' } }
-    Write-Host ('  {0,-14} {1,-5} {2}' -f $Id, $status, (Squash $Name 46)) -ForegroundColor $color
+    Write-Host ('  {0,-5} {1,-14} {2,-5} {3}' -f $script:CurrentTrack, $Id, $status, (Squash $Name 46)) -ForegroundColor $color
 }
 
 # ==============================================================================
@@ -609,7 +641,17 @@ function Test-NoForbiddenSymbols {
 
 function New-HomeSandbox {
     param([string]$Name)
-    $dir = New-Dir (Join-Path $script:Work "home_$Name")
+    # 沙箱一律從空的開始：先砍掉同名殘留再建。頂層 -Clean 用的是
+    # Remove-Item -ErrorAction SilentlyContinue，任何一個檔案刪不掉（被佔用、
+    # 上一輪的子行程還沒退乾淨）都會靜默留下殘骸，而一個「已經有 private.key」
+    # 的沙箱會讓 -GenerateKeys 走到「私鑰已存在」分支——既可能製造假紅（本案
+    # 一開始就是這樣誤判成搬移出錯），也可能讓某些案例假綠。沙箱是否乾淨是
+    # 每個金鑰案例的前提，不能靠呼叫端記得先清。
+    $dir = Join-Path $script:Work "home_$Name"
+    if ([System.IO.Directory]::Exists($dir)) {
+        Remove-Item -LiteralPath $dir -Recurse -Force
+    }
+    [void](New-Dir $dir)
     return @{
         Path = $dir
         Env  = @{
@@ -819,12 +861,23 @@ $script:WrapperPath = Join-Path $script:Work 'wrapper.ps1'
 
 function Invoke-VerifyTrack {
     param(
+        [string]$TrackName,
+        [string]$TrackDesc,
         [string]$SealScript,
         [string]$OpenScript
     )
 
-    $script:Work = $WorkRoot
+    # 每一軌用自己的工作目錄：沙箱家目錄（home_A / home_force …）在軌與軌之間
+    # 必須完全隔離，否則第二軌的 -GenerateKeys 會撞上第一軌留下的 private.key，
+    # 被「私鑰已存在」擋掉，前置直接紅。
+    $script:CurrentTrack = $TrackName
+    $script:Work = Join-Path $WorkRoot $TrackName
     [void](New-Dir $script:Work)
+
+    Write-Host ''
+    Write-Host ('===== 軌別 [{0}] {1} =====' -f $TrackName, $TrackDesc) -ForegroundColor Magenta
+    Write-Host ('      seal = {0}' -f $SealScript)
+    Write-Host ('      open = {0}' -f $OpenScript)
 
     function Invoke-TCase {
         param([string]$Id, [string]$Name, [scriptblock]$Body)
@@ -954,8 +1007,8 @@ function Invoke-VerifyTrack {
         return ('沙箱 ~\.rune\public.pem 就緒，指紋 RUNE-KEY {0} 與印出值逐字相符；seal / open 皆直接對原檔執行，全程未製作任何腳本副本' -f $expect)
     }
 
-    # 前置未過就沒有意義往下跑（只看本軌新增的 P 系列結果，不受另一軌影響）
-    $preFailCount = @($script:Results | Where-Object { $_.No -like 'P*' -and $_.Result -eq 'FAIL' }).Count
+    # 前置未過就沒有意義往下跑（只看本軌的 P 系列結果，不受另一軌影響）
+    $preFailCount = @($script:Results | Where-Object { $_.Track -eq $TrackName -and $_.No -like 'P*' -and $_.Result -eq 'FAIL' }).Count
     $trackCanRun = ($preFailCount -eq 0)
 
     # ------- 共用測試素材 -------
@@ -1810,6 +1863,12 @@ function Invoke-VerifyTrack {
     # 程式碼（DPAPI／私鑰匯入／ZIP 解包），反之亦然。沒有這道檢查，幾次「順手」
     # 的改動之後解密邏輯會慢慢滲回加密端，切檔就白做了。只掃「非註解」token
     # （見 Test-NoForbiddenSymbols），註解裡的交叉參照說明不算違規。
+    #
+    # 【mod 軌的重要說明】模組化之後單檔部署已放棄，加密端改為複製整個 RunePost
+    # 資料夾——解密端的程式碼本來就會跟著過去。因此這兩案在 mod 軌只掃到薄入口
+    # 腳本，形同必然通過，守不住原本那個屬性。此處刻意「原樣保留、不改語意」是
+    # 為了維持雙軌逐格可比；「最小部署」這個目標是否還要、若要該怎麼重新表述
+    # （例如改成掃 Public/ 的相依方向），屬於階段二的決策，不在純搬移的範圍內。
 
     Invoke-TCase 'C63' '負面符號掃描：rune-seal.ps1 的程式碼不含任何解密端專屬符號' {
         Test-NoForbiddenSymbols -Path $script:SutSeal -Forbidden @(
@@ -2117,10 +2176,35 @@ function Invoke-VerifyTrack {
 # 10. 驅動
 # ==============================================================================
 
-Invoke-VerifyTrack -SealScript $script:SealScript -OpenScript $script:OpenScript
+foreach ($t in $script:Tracks) {
+    Invoke-VerifyTrack -TrackName $t.Name -TrackDesc $t.Desc -SealScript $t.Seal -OpenScript $t.Open
+}
 
 # ==============================================================================
-# 11. 報表
+# 11. 雙軌等價比對
+#     同一個案號在兩軌的結果必須完全相同。任何一格不同都代表「搬移改變了行為」，
+#     整份驗收即視為失敗——這比「兩軌各自全綠」更嚴格，SKIP/INFO 的分佈也得一致。
+# ==============================================================================
+
+$script:TrackDiffs = @()
+if ($script:Tracks.Count -ge 2) {
+    $base = $script:Tracks[0].Name
+    foreach ($t in $script:Tracks | Select-Object -Skip 1) {
+        $a = @{}; foreach ($r in $script:Results | Where-Object Track -EQ $base) { $a[$r.No] = $r }
+        $b = @{}; foreach ($r in $script:Results | Where-Object Track -EQ $t.Name) { $b[$r.No] = $r }
+        foreach ($no in ($a.Keys + $b.Keys | Sort-Object -Unique)) {
+            if (-not $a.ContainsKey($no)) { $script:TrackDiffs += "$no：只有 [$($t.Name)] 軌跑到"; continue }
+            if (-not $b.ContainsKey($no)) { $script:TrackDiffs += "$no：只有 [$base] 軌跑到"; continue }
+            if ($a[$no].Result -ne $b[$no].Result) {
+                $script:TrackDiffs += ('{0}：[{1}]={2} 但 [{3}]={4} — {5}' -f `
+                        $no, $base, $a[$no].Result, $t.Name, $b[$no].Result, (Squash $b[$no].Evidence 120))
+            }
+        }
+    }
+}
+
+# ==============================================================================
+# 12. 報表
 # ==============================================================================
 
 $pass = @($script:Results | Where-Object Result -EQ 'PASS').Count
@@ -2129,6 +2213,7 @@ $skip = @($script:Results | Where-Object Result -EQ 'SKIP').Count
 $info = @($script:Results | Where-Object Result -EQ 'INFO').Count
 
 $table = $script:Results | Select-Object `
+@{N = '軌'; E = { $_.Track } },
 @{N = '編號'; E = { $_.No } },
 @{N = '案例'; E = { Squash $_.Case 44 } },
 @{N = '結果'; E = { $_.Result } },
@@ -2143,8 +2228,28 @@ if ($script:EscapeNotes.Count) {
     $script:EscapeNotes | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
 }
 
+foreach ($t in $script:Tracks) {
+    $rs = @($script:Results | Where-Object Track -EQ $t.Name)
+    Write-Host ('  軌 [{0,-4}] {1,3} 案：PASS {2} / FAIL {3} / SKIP {4} / INFO {5}' -f `
+            $t.Name, $rs.Count,
+        @($rs | Where-Object Result -EQ 'PASS').Count, @($rs | Where-Object Result -EQ 'FAIL').Count,
+        @($rs | Where-Object Result -EQ 'SKIP').Count, @($rs | Where-Object Result -EQ 'INFO').Count) `
+        -ForegroundColor $(if (@($rs | Where-Object Result -EQ 'FAIL').Count) { 'Red' } else { 'Green' })
+}
+
+if ($script:Tracks.Count -ge 2) {
+    if ($script:TrackDiffs.Count -eq 0) {
+        $n = @($script:Results | Where-Object Track -EQ $script:Tracks[0].Name).Count
+        Write-Host ('雙軌等價：{0} 個案號在所有軌別的結果逐格相同（含 SKIP/INFO 分佈）' -f $n) -ForegroundColor Green
+    }
+    else {
+        Write-Host '雙軌不等價（搬移改變了行為）：' -ForegroundColor Red
+        $script:TrackDiffs | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    }
+}
+
 Write-Host ('總計 {0} 案：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info) -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
-Write-Host ('工作目錄：{0}' -f $script:Work)
+Write-Host ('工作目錄：{0}' -f $WorkRoot)
 
 # 報表／log 跟著 -WorkRoot 走，不寫死在本腳本所在目錄——受審物常是唯讀 checkout，
 # 寫死在腳本目錄會在裡面留檔，甚至在唯讀掛載下直接寫入失敗。
@@ -2159,13 +2264,30 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('')
 [void]$sb.AppendLine('完整證據：')
 foreach ($r in $script:Results) {
-    [void]$sb.AppendLine(('{0} [{1}] {2}' -f $r.No, $r.Result, $r.Case))
+    [void]$sb.AppendLine(('[{0}] {1} [{2}] {3}' -f $r.Track, $r.No, $r.Result, $r.Case))
     [void]$sb.AppendLine('     ' + $r.Evidence)
 }
 if ($script:EscapeNotes.Count) { [void]$sb.AppendLine('沙箱逃逸：' + ($script:EscapeNotes -join ' | ')) }
+[void]$sb.AppendLine('')
+if ($script:Tracks.Count -ge 2) {
+    if ($script:TrackDiffs.Count -eq 0) {
+        [void]$sb.AppendLine('雙軌等價：所有案號在各軌的結果逐格相同（含 SKIP/INFO 分佈）')
+    }
+    else {
+        [void]$sb.AppendLine('雙軌不等價：')
+        $script:TrackDiffs | ForEach-Object { [void]$sb.AppendLine('  - ' + $_) }
+    }
+}
+foreach ($t in $script:Tracks) {
+    $rs = @($script:Results | Where-Object Track -EQ $t.Name)
+    [void]$sb.AppendLine(('軌 [{0}] {1}：{2} 案 PASS {3} / FAIL {4} / SKIP {5} / INFO {6}' -f `
+                $t.Name, $t.Desc, $rs.Count,
+            @($rs | Where-Object Result -EQ 'PASS').Count, @($rs | Where-Object Result -EQ 'FAIL').Count,
+            @($rs | Where-Object Result -EQ 'SKIP').Count, @($rs | Where-Object Result -EQ 'INFO').Count))
+}
 [void]$sb.AppendLine(('總計 {0}：PASS {1} / FAIL {2} / SKIP {3} / INFO {4}' -f $script:Results.Count, $pass, $fail, $skip, $info))
 [System.IO.File]::WriteAllText($reportPath, $sb.ToString(), $script:Utf8Bom)
 [System.IO.File]::WriteAllLines($logPath, $script:LogLines, $script:Utf8Bom)
 Write-Host ('報表：{0}' -f $reportPath)
 
-exit ([int]($fail -gt 0))
+exit ([int](($fail -gt 0) -or ($script:TrackDiffs.Count -gt 0)))
