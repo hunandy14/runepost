@@ -64,7 +64,14 @@ if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $script:TestsDir }
 $script:RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 if (-not $WorkRoot) { $WorkRoot = Join-Path $script:TestsDir '_mutwork' }
 $script:Verify = Join-Path $script:TestsDir 'verify.ps1'
-$script:InflightDir = Join-Path $WorkRoot '.inflight'
+
+# 守護檔一律放在 repo 內的固定位置，不跟著 -WorkRoot 走：它們要能被「拿到這份
+# repo 的人」看見，而不是被藏在某個自訂工作目錄裡。
+#   RUNNING    執行期間存在，宣告本 repo 正處於「可能已植入缺陷」的中間狀態
+#   .inflight  植入期間保存目標檔案的原始位元組，供被中斷後的下一輪自動還原
+$script:GuardDir = Join-Path $script:TestsDir '_mutwork'
+$script:LockFile = Join-Path $script:GuardDir 'RUNNING'
+$script:InflightDir = Join-Path $script:GuardDir '.inflight'
 
 if (-not (Test-Path -LiteralPath $script:Verify)) { throw "找不到驗收套件：$script:Verify" }
 
@@ -165,6 +172,26 @@ C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，
         Note = 'C81（保護方式須在成功輸出第一行）只在 Full 層執行，Core 層不會出現。'
     }
 
+    M7 = @{
+        Desc = '兩則路徑安全訊息退化成一般的封存格式錯誤'
+        File = 'RunePost\Private\Expand-RuneZip.ps1'
+        Old = @(
+            '"偵測到不安全的封存路徑（entry 名稱含反斜線）：$($entry.FullName)")'
+            '"偵測到不安全的封存路徑（跳脫目的資料夾）：$($entry.FullName)")'
+        )
+        New = @(
+            '"封存格式錯誤：$($entry.FullName)")   # MUTATION M7'
+            '"封存格式錯誤：$($entry.FullName)")   # MUTATION M7'
+        )
+        MustRed = @('C37', 'C41', 'C46', 'C47')
+        MayRed = @()
+        Note = @'
+檢查本身完好，仍然拒絕、仍然不逸出，只有措辭退化。四案全紅代表訊息斷言確實有
+咬合力——「不安全的封存路徑」是獨立語意，不可以用「格式損壞」搪塞過去，否則
+使用者會把攻擊誤讀成檔案壞掉。
+'@
+    }
+
     M5 = @{
         Desc = '拿掉私鑰檔的 ACL 收斂'
         File = 'RunePost\Private\Set-RunePrivateKeyAcl.ps1'
@@ -221,8 +248,24 @@ function Get-ProductHash {
 }
 
 # ==============================================================================
-# in-flight 標記：植入期間留下原始位元組，讓被強制中斷的上一輪可以自動還原
+# 中間狀態的守護
+#
+# 執行期間 repo 裡的產品程式碼隨時可能是被植入缺陷的版本。RUNNING 這個 lock 檔
+# 就是給人與工具看的旗標：看到它就代表現在讀到／複製到的程式碼不可信。
+# 植入期間另外把目標檔案的原始位元組留在 .inflight，行程被強制中斷時下一輪啟動
+# 會自動還原。
 # ==============================================================================
+
+function Set-RunLock {
+    [void][System.IO.Directory]::CreateDirectory($script:GuardDir)
+    [System.IO.File]::WriteAllText($script:LockFile,
+        ("變異測試執行中，開始於 {0}（PID {1}）。`n本 repo 的產品程式碼可能正處於被植入缺陷的中間狀態，請勿讀取或複製。`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PID),
+        [System.Text.UTF8Encoding]::new($false))
+}
+
+function Clear-RunLock {
+    if (Test-Path -LiteralPath $script:LockFile) { Remove-Item -LiteralPath $script:LockFile -Force }
+}
 
 function Set-Inflight {
     param([string]$Path, [byte[]]$OriginalBytes, [string]$Name)
@@ -237,18 +280,29 @@ function Clear-Inflight {
     }
 }
 
-function Restore-Inflight {
+# 啟動時先處理上一輪被強制中斷留下的殘骸。無論走哪條路徑都會清掉 lock 與
+# .inflight，因此任何入口（含 -List）都可以、也應該先呼叫這個函式。
+function Restore-InterruptedRun {
     $meta = Join-Path $script:InflightDir 'target.txt'
     $bin = Join-Path $script:InflightDir 'original.bin'
-    if (-not (Test-Path -LiteralPath $meta) -or -not (Test-Path -LiteralPath $bin)) { return }
-    $lines = @([System.IO.File]::ReadAllLines($meta))
-    $name = $lines[0]
-    $path = $lines[1]
-    Write-Host ''
-    Write-Host "偵測到上一輪未還原的變異 $name，正在還原：$path" -ForegroundColor Yellow
-    [System.IO.File]::WriteAllBytes($path, [System.IO.File]::ReadAllBytes($bin))
+    $hasPending = (Test-Path -LiteralPath $meta) -and (Test-Path -LiteralPath $bin)
+    $hasLock = Test-Path -LiteralPath $script:LockFile
+
+    if ($hasPending) {
+        $lines = @([System.IO.File]::ReadAllLines($meta))
+        $name = $lines[0]
+        $path = $lines[1]
+        Write-Host ''
+        Write-Host "偵測到上一輪未還原的變異 $name，正在還原：$path" -ForegroundColor Yellow
+        [System.IO.File]::WriteAllBytes($path, [System.IO.File]::ReadAllBytes($bin))
+        Write-Host '已還原。' -ForegroundColor Yellow
+    }
+    elseif ($hasLock) {
+        Write-Host ''
+        Write-Host '偵測到上一輪的執行標記但沒有待還原的檔案（中斷發生在植入之前或還原之後），清除標記。' -ForegroundColor Yellow
+    }
     Clear-Inflight
-    Write-Host '已還原。' -ForegroundColor Yellow
+    Clear-RunLock
 }
 
 # ==============================================================================
@@ -279,6 +333,13 @@ function Invoke-Suite {
         Info    = @($res.GetEnumerator() | Where-Object { $_.Value -eq 'INFO' } | ForEach-Object Key)
     }
 }
+
+# ==============================================================================
+# 殘骸回收（排在所有出口之前，含 -List：任何一次啟動都要有機會把上一輪的中間
+# 狀態收乾淨，不能因為這次只是查看清單就跳過）
+# ==============================================================================
+
+Restore-InterruptedRun
 
 # ==============================================================================
 # -List
@@ -320,12 +381,15 @@ foreach ($n in $names) {
 }
 
 [void][System.IO.Directory]::CreateDirectory($WorkRoot)
-Restore-Inflight
 
 Write-Host ''
 Write-Host '========== runepost 驗收套件變異測試 ==========' -ForegroundColor Cyan
 Write-Host ("repo：{0}" -f $script:RepoRoot)
 Write-Host ("層級：{0}；變異：{1}" -f $Tier, ($names -join ', '))
+Write-Host ''
+Write-Host '植入期間本 repo 的產品程式碼會處於被刻意植入缺陷的中間狀態：' -ForegroundColor Yellow
+Write-Host '請勿在此期間讀取、複製、打包或建立這份 repo 的副本。' -ForegroundColor Yellow
+Write-Host ("狀態旗標：{0}（存在即代表仍在執行；正常結束會自行移除）" -f $script:LockFile) -ForegroundColor Yellow
 
 $baseHash = Get-ProductHash
 Write-Host ("產品程式碼基線雜湊：{0}" -f $baseHash.Substring(0, 32) + '…')
@@ -347,6 +411,11 @@ if (-not $SkipControl) {
 
 $rows = [System.Collections.Generic.List[object]]::new()
 $notes = [System.Collections.Generic.List[string]]::new()
+
+# 從這裡開始 repo 隨時可能是被植入的版本。旗標留到全部跑完才移除；若行程被強制
+# 中斷而留下旗標，下一次啟動的 Restore-InterruptedRun 會連同 .inflight 一起收掉。
+# 殘留的旗標是安全的一邊：它讓人不信任這份 repo，而不是誤以為它乾淨。
+Set-RunLock
 
 foreach ($name in $names) {
     $m = $script:Catalog[$name]
@@ -397,6 +466,8 @@ foreach ($name in $names) {
         Write-Host ('嚴重：還原後產品程式碼雜湊與基線不符。受影響檔案：' + $path) -ForegroundColor Red
         Write-Host ('  基線 {0}' -f $baseHash) -ForegroundColor Red
         Write-Host ('  目前 {0}' -f $nowHash) -ForegroundColor Red
+        Write-Host ('狀態旗標刻意保留：' + $script:LockFile) -ForegroundColor Red
+        # 這條路徑上 repo 真的處於不可信狀態，旗標留著才對，不清。
         exit 2
     }
 
@@ -451,6 +522,8 @@ if ($notes.Count) {
 
 $bad = @($rows | Where-Object { $_.判定 -ne 'OK' })
 $finalHash = Get-ProductHash
+# 全部還原完成，repo 回到可信狀態，旗標可以撤了。
+if ($finalHash -eq $baseHash) { Clear-RunLock }
 Write-Host ("產品程式碼還原確認：{0}（{1}）" -f $(if ($finalHash -eq $baseHash) { '與基線位元組相同' } else { '不符！' }), $finalHash.Substring(0, 32) + '…') `
     -ForegroundColor $(if ($finalHash -eq $baseHash) { 'Green' } else { 'Red' })
 Write-Host ('工作目錄：{0}' -f $WorkRoot)

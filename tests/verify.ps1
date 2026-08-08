@@ -291,7 +291,9 @@ $script:Msg = [ordered]@{
     'notfound'            = '找不到|不存在|not found'
     'noninteractive'      = '非互動'
     'passphrase'          = '密碼'
-    'emptyfile'           = '空'
+    # 只寫一個「空」字會被「空白」「空的」這類無關字眼命中，等於樣式失效；
+    # 要求的是「明講這個檔案本身是空的」這句話。
+    'emptyfile'           = '是空檔案|檔案為空|內容為空|空檔案|empty file|file is empty'
     'legacymagic'         = 'CTXT'
     'dpapi'               = 'DPAPI'
     'fingerprint'         = 'RUNE-KEY'
@@ -1570,7 +1572,10 @@ Invoke-TCase 'C01' '單檔 roundtrip（256KB 二進位，SHA-256 逐檔比對）
     return ('1 檔位元完全一致；SHA={0}…；容器 {1}B' -f (Get-Sha $src).Substring(0, 12), (Get-Item -LiteralPath $ct.Out).Length)
 }
 
-Invoke-TCase 'C02' 'wildcard（含中文檔名）roundtrip 且不遞迴' -Tier Full -Needs @('CtWild') {
+# wildcard 分支在 Core：不遞迴失守的後果是把使用者沒打算公開的子目錄內容一起
+# 掃進要貼到公開管道的容器，那是機密性問題。C03 走的是資料夾模式，完全不經過
+# Get-RunePackPlan 的 wildcard 分支，代替不了這一案。
+Invoke-TCase 'C02' 'wildcard（含中文檔名）roundtrip 且不遞迴' -Tier Core -Needs @('CtWild') {
     $ct = Get-Fixture 'CtWild'
     $c = Assert-UnpackMatches -Txt $ct.Out -KeyFile (Get-Fixture 'KeyA').KeyPath -DestName 'wild' `
         -Expected (Get-WildExpectedMap) -AllowRootPrefix 'wild' -What 'Unpack(wild)'
@@ -2120,7 +2125,7 @@ Invoke-TCase 'C56' '-PublicKey 收檔案路徑：可用非預設位置的公鑰�
     return ('以 -PublicKey <路徑> 讀取非預設位置的公鑰檔，roundtrip 位元一致')
 }
 
-Invoke-TCase 'C57' '公鑰指紋：格式穩定、seal 與 -GenerateKeys 逐字一致且可獨立重算' -Tier Core -Needs @('Fx', 'KeyA') {
+Invoke-TCase 'C57' 'seal 成功輸出：指紋格式穩定、與 -GenerateKeys 逐字一致、可獨立重算，且含輸出檔名' -Tier Core -Needs @('Fx', 'KeyA') {
     $k = Get-Fixture 'KeyA'
     $genFp = Get-Fingerprint -Text $k.Result.All
     Assert ($null -ne $genFp) ('-GenerateKeys 未印出 RUNE-KEY 指紋（8 組 ×4 大寫 hex）：' + (Squash $k.Result.All 200))
@@ -2139,7 +2144,11 @@ Invoke-TCase 'C57' '公鑰指紋：格式穩定、seal 與 -GenerateKeys 逐字�
     $hex = [Convert]::ToHexString($digest, 0, 16)
     $expect = ((0..7) | ForEach-Object { $hex.Substring($_ * 4, 4) }) -join '-'
     Assert ($sealFp -eq $expect) ('指紋與 SHA-256(SPKI DER) 前 16 bytes 不符：實得 {0}，應為 {1}' -f $sealFp, $expect)
-    return ('RUNE-KEY {0}；兩端逐字一致且等於 SHA-256(SPKI DER)[0..15]' -f $expect)
+
+    # 成功輸出必須告知密文寫到哪裡：使用者跑完 -Pack 卻不知道檔案在哪，這件事就沒做完。
+    Assert ($p.StdOut -match [regex]::Escape((Split-Path -Leaf $out))) `
+    ('-Pack 的成功輸出未提及輸出檔名 {0}：{1}' -f (Split-Path -Leaf $out), (Squash $p.StdOut 200))
+    return ('RUNE-KEY {0}；兩端逐字一致且等於 SHA-256(SPKI DER)[0..15]；成功輸出含輸出檔名 {1}' -f $expect, (Split-Path -Leaf $out))
 }
 
 Invoke-TCase 'C58' '-ExportPublicKey 可從既有私鑰重建 public.pem，指紋不變' -Tier Full -Needs @('KeyA') {
@@ -2171,7 +2180,9 @@ Invoke-TCase 'C58' '-ExportPublicKey 可從既有私鑰重建 public.pem，指�
     }
 }
 
-Invoke-TCase 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' -Tier Full -Needs @('Fx', 'KeyA', 'KeyB') {
+# 指紋是公鑰被掉包時唯一的防線，這一案在 Core。C57 用的是預設金鑰，「不管公鑰
+# 從哪裡載入都印同一個指紋」這類缺陷 C57 抓不到，只有本案抓得到。
+Invoke-TCase 'C59' 'public.pem 被換成另一把金鑰 → 指紋必須改變（防掉包防線有效）' -Tier Core -Needs @('Fx', 'KeyA', 'KeyB') {
     $a = Get-Fixture 'KeyA'; $b = Get-Fixture 'KeyB'
     Assert ($null -ne $b.PublicPem) '前置 P5 未取得金鑰 B 的公鑰'
     $sb = New-HomeSandbox -Name 'swap'
