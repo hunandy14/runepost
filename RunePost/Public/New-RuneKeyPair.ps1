@@ -12,13 +12,18 @@ function New-RuneKeyPair {
 
         回傳 Rune.KeyPair 物件；使用者在覆蓋確認時選擇不繼續則不回傳任何東西，
         呼叫端據此判斷是否被取消。呈現由呼叫端負責。
+
+        既有私鑰會被改名保留，屬破壞性動作，因此宣告 ConfirmImpact High：預設就會
+        要求確認，-Force（或 -Confirm:$false）略過，-WhatIf 則只說明將要發生什麼、
+        不寫入任何檔案。
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     [OutputType([pscustomobject])]
     param(
         [ValidateSet('None', 'Passphrase', 'Dpapi')]
         [string] $Protect = 'None',
         [securestring] $Passphrase,
+        # 略過覆蓋確認，供非互動情境（腳本、排程）使用。舊金鑰仍會改名保留。
         [switch] $Force
     )
 
@@ -26,9 +31,36 @@ function New-RuneKeyPair {
     $backupPlan = $null
     if ($keyExists) {
         $backupPlan = Get-RuneKeyBackupPaths
-        if (-not (Confirm-RuneKeyOverwrite -Force:$Force -BackupPlan $backupPlan)) {
-            return
-        }
+    }
+
+    # 高衝擊的是「覆蓋既有金鑰」而不是「產生金鑰」本身：第一次產生不會動到任何既有
+    # 檔案，所以不主動問。-Force 則是「不要問」的慣例寫法。兩者都讓使用者明確寫出
+    # 的 -Confirm 勝出。
+    if ((-not $keyExists -or $Force) -and -not $PSBoundParameters.ContainsKey('Confirm')) {
+        $ConfirmPreference = 'None'
+    }
+
+    # 確認提示到底會不會出現：-WhatIf 不問，$ConfirmPreference = None 也不問。
+    $willConfirm = (-not $WhatIfPreference) -and ($ConfirmPreference -ne 'None')
+
+    # 非互動防呆疊在 ShouldProcess 之外。PowerShell 在真正的 NonInteractive host 下
+    # 呼叫確認會擲回例外而不是卡住，但那依賴 host 正確回報自己不可互動，沒有跨版本
+    # 保證；標準輸入被重新導向時一律主動拒絕，並指出 -Force 這條出路。
+    if ($keyExists -and $willConfirm -and [Console]::IsInputRedirected) {
+        throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n非互動環境無法提示確認，請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"
+    }
+
+    $action = if ($keyExists) {
+        "產生新的 ECDH P-256 金鑰對，既有金鑰改名保留為 $($backupPlan.KeyBackup)"
+    }
+    else {
+        "產生 ECDH P-256 金鑰對：$($Script:DefaultKeyFile)"
+    }
+    $caption = if ($keyExists) { "$($Script:DefaultKeyFile) 已存在" } else { '產生 ECDH P-256 金鑰對' }
+    # 提示內文要讀出既有私鑰才能算指紋，只有真的要問的時候才付這個代價。
+    $query = if ($keyExists -and $willConfirm) { Get-RuneKeyOverwritePrompt -BackupPlan $backupPlan } else { $action }
+    if (-not $PSCmdlet.ShouldProcess($action, $query, $caption)) {
+        return
     }
     # 私鑰不存在但 public.pem 還在：直接覆蓋。孤兒 public.pem（私鑰已遺失）比沒有檔案
     # 更危險——加密端會持續加密給一把沒人持有的金鑰，產出永久無法解讀的密文。

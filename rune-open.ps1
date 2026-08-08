@@ -234,8 +234,12 @@ try {
                 -PublicKeyFilePath $result.PublicKeyFile -Fingerprint $result.Fingerprint
         }
         'ExportPrivateKey' {
+            # CLI 的 -Force 一次表達兩件事：略過確認、允許覆蓋既有的 -OutFile。模組
+            # 函式把這兩件事分開，所以在這一層拆成 -Confirm:$false 與 -Force 兩個
+            # 開關；不帶 -Force 時明確送出 -Confirm:$true，確保確認提示不會因為
+            # 呼叫端 session 的 $ConfirmPreference 而被跳過。
             $result = Export-RunePrivateKey -OutFilePath $OutFile -KeyFilePath $KeyFile -Protect $Protect `
-                -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force `
+                -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force -Confirm:(-not $Force) `
                 -WarningVariable keyWarnings -WarningAction SilentlyContinue
             if ($result) {
                 Write-Host "已匯出私鑰（格式：$($result.ProtectNote)）"

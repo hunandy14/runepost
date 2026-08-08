@@ -15,12 +15,19 @@ function Export-RunePrivateKey {
           -OutPassphrase 輸出檔的密碼，-Protect Passphrase 時需要。與 -Passphrase
                          分開，因為兩者是不同的密碼：來源與備份可以各自設定，
                          也才能在非互動環境下同時指定。
-          -Force         略過確認提示，並允許覆蓋已存在的 -OutFilePath。
+          -Force         允許覆蓋已存在的 -OutFilePath。只管覆蓋這一件事，與確認
+                         提示無關——那由 -Confirm / $ConfirmPreference 決定。兩者
+                         分開，是因為「我知道那個檔案要被蓋掉」與「我不需要有人再
+                         問我一次要不要匯出私鑰」是兩個獨立的判斷。
 
         回傳 Rune.PrivateKeyExport 物件；使用者在確認提示選擇不繼續則不回傳任何
         東西，呼叫端據此判斷是否被取消。呈現由呼叫端負責。
+
+        匯出會把私鑰寫成一份新的、可攜的檔案，是提高私鑰暴露面的動作，因此宣告
+        ConfirmImpact High：預設就會要求確認，-Confirm:$false 略過，-WhatIf 則只
+        說明將要發生什麼、不寫入任何檔案。
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
@@ -56,7 +63,22 @@ function Export-RunePrivateKey {
         throw "私鑰匯出失敗：輸出路徑的資料夾不存在：$outDir"
     }
 
-    if (-not (Confirm-RunePrivateKeyExport -Force:$Force -SourceKeyPath $sourcePath -OutFilePath $outFull -Protect $Protect)) {
+    # 確認提示到底會不會出現：-WhatIf 不問，-Confirm:$false（或呼叫端把
+    # $ConfirmPreference 設成 None）也不問。-Force 不在這個判斷裡——它只管覆蓋。
+    $willConfirm = (-not $WhatIfPreference) -and ($ConfirmPreference -ne 'None')
+
+    # 非互動防呆疊在 ShouldProcess 之外，理由同 New-RuneKeyPair：不依賴 host 是否
+    # 正確回報自己不可互動，標準輸入被重新導向時一律主動拒絕。
+    if ($willConfirm -and [Console]::IsInputRedirected) {
+        throw "私鑰匯出已中止：目前為非互動環境（標準輸入已重新導向），無法顯示確認提示。`n請加上 -Confirm:`$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。"
+    }
+
+    $action = "把 $sourcePath 匯出成 $(Get-RunePrivateKeyProtectNote -Protect $Protect)：$outFull"
+    $query = if ($willConfirm) {
+        Get-RunePrivateKeyExportPrompt -SourceKeyPath $sourcePath -OutFilePath $outFull -Protect $Protect
+    }
+    else { $action }
+    if (-not $PSCmdlet.ShouldProcess($action, $query, '即將匯出私鑰')) {
         return
     }
 

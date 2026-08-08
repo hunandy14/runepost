@@ -1312,7 +1312,7 @@ Register-Fixture 'ExportedEncKey' {
     $body = @'
 Import-Module $env:RUNE_MODULE -Force
 $pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
-Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force
+Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force -Confirm:$false
 'HEAD=' + (Get-Content -LiteralPath $env:RUNE_OUTKEY -TotalCount 1)
 try {
     Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DESTBAD -KeyFilePath $env:RUNE_OUTKEY
@@ -2849,6 +2849,110 @@ Invoke-TCase 'C82' '-ExportPrivateKey 原子寫入：正常路徑不留 .tmp-* �
     $ind.ImportFromPem($text)
     Assert ([Convert]::ToHexString($ind.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($k.PubSpki)) '匯出檔內容不是金鑰 A'
     return ('連續匯出 2 次（含 -Force 覆蓋），資料夾只剩 1 個完整可載入的 PEM，無 .tmp-* 殘留')
+}
+
+# 兩個破壞性動作（產生金鑰會改名既有金鑰、匯出私鑰會多一份私鑰落地）改用
+# SupportsShouldProcess 之後，-WhatIf / -Confirm / -Force 三者的界線要各自釘死。
+# 這三案一律以模組身分執行：-WhatIf 與 -Confirm 是 common parameters，入口腳本沒有
+# 宣告 SupportsShouldProcess，命令列上沒有這兩個開關。
+
+Invoke-TCase 'C84' 'ShouldProcess：-WhatIf 完全不寫入（產生金鑰／匯出私鑰兩條路徑）' -Tier Core -Needs @('KeyA') {
+    # -WhatIf 的價值全在「真的什麼都沒做」。用全新的空沙箱跑兩條破壞性路徑，事後
+    # 要求沙箱與匯出目標都一個檔案也沒有，而且函式沒有回傳結果物件——回傳了就代表
+    # 動作真的執行過。
+    $sb = New-HomeSandbox -Name 'whatif'
+    $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'whatif.pem'
+    if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+
+    $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$g = New-RuneKeyPair -WhatIf
+'GEN_RETURNED=' + [bool]$g
+$e = Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -WhatIf
+'EXP_RETURNED=' + [bool]$e
+'DONE=1'
+'@
+    $r = Invoke-RuneProbe -Name 'whatif' -Body $body -EnvVars ($sb.Env + @{
+            RUNE_OUTKEY = $outKey; RUNE_SRCKEY = (Get-Fixture 'KeyA').KeyPath
+        }) -Timeout 60
+    Assert (-not $r.TimedOut) '-WhatIf 竟停在互動提示（子行程逾時）'
+    Assert (-not $r.Failed) ('-WhatIf 不該失敗：' + (Squash $r.All 200))
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['DONE'] -eq '1') '探針未跑完'
+    Assert ($kv['GEN_RETURNED'] -eq 'False') 'New-RuneKeyPair -WhatIf 竟回傳了結果物件（動作真的做了）'
+    Assert ($kv['EXP_RETURNED'] -eq 'False') 'Export-RunePrivateKey -WhatIf 竟回傳了結果物件（動作真的做了）'
+    Assert (-not [System.IO.File]::Exists($sb.KeyPath)) "-WhatIf 竟產生了私鑰：$($sb.KeyPath)"
+    Assert (-not [System.IO.File]::Exists($sb.PubPath)) "-WhatIf 竟產生了公鑰：$($sb.PubPath)"
+    Assert (-not [System.IO.File]::Exists($outKey)) "-WhatIf 竟產生了匯出檔：$outKey"
+    Assert (-not [System.IO.Directory]::Exists((Join-Path $sb.Path '.rune'))) '-WhatIf 竟建立了 .rune 資料夾'
+    $whatIfLines = @(($r.StdOut -split "`r?`n") | Where-Object { $_ -match 'What if|如果' }).Count
+    Assert ($whatIfLines -ge 2) ('兩條路徑應各印一行 What if 說明，實得 {0} 行：{1}' -f $whatIfLines, (Squash $r.StdOut 200))
+    return ('兩條破壞性路徑帶 -WhatIf：皆未回傳結果物件、沙箱沒有 .rune、沒有匯出檔，並各印出一行預演說明')
+}
+
+Invoke-TCase 'C85' 'ShouldProcess：-Confirm:$false 可在非互動環境略過確認完成匯出' -Tier Full -Needs @('KeyA') {
+    $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'confirmfalse.pem'
+    if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+
+    $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$r = Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Confirm:$false
+'OUT=' + $r.OutFile
+'FP=' + $r.Fingerprint
+'DONE=1'
+'@
+    $r = Invoke-RuneProbe -Name 'confirmfalse' -Body $body -EnvVars ((Get-Fixture 'KeyA').Sandbox.Env + @{
+            RUNE_OUTKEY = $outKey; RUNE_SRCKEY = (Get-Fixture 'KeyA').KeyPath
+        }) -Timeout 60
+    Assert (-not $r.TimedOut) '子行程逾時（-Confirm:$false 竟仍停在確認提示）'
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['DONE'] -eq '1') ('探針未跑完：' + (Squash $r.All 200))
+    Assert ([System.IO.File]::Exists($outKey)) '-Confirm:$false 未產生匯出檔'
+    $text = [System.IO.File]::ReadAllText($outKey)
+    Assert ($text -match '-----BEGIN PRIVATE KEY-----') ('匯出檔不是 PKCS#8 PEM：' + (Squash $text 60))
+    Assert ($kv['OUT'] -eq $outKey) ('回傳物件的 OutFile 與實際輸出不符：' + $kv['OUT'])
+    return ('非互動環境下只靠 -Confirm:$false（未帶 -Force）即完成匯出，指紋 RUNE-KEY ' + $kv['FP'])
+}
+
+Invoke-TCase 'C86' 'ShouldProcess：-Force 只管覆蓋，不代表略過確認' -Tier Full -Needs @('KeyA') {
+    # 兩件事各自獨立，所以兩個方向都要試：
+    #   (a) 只給 -Force → 確認提示照樣需要，非互動環境必須被擋下、不得產生檔案。
+    #   (b) 只給 -Confirm:$false → 確認略過了，但既有的 -OutFile 仍不得被覆蓋。
+    $dir = Clear-Dir (Join-Path $script:Work 'keybackup_orthogonal')
+    $forceOnly = Join-Path $dir 'forceonly.pem'
+    $existing = Join-Path $dir 'existing.pem'
+    [System.IO.File]::WriteAllText($existing, 'NOT A KEY', $script:Utf8NoBom)
+    $before = Get-Sha $existing
+
+    $body = @'
+Import-Module $env:RUNE_MODULE -Force
+try {
+    Export-RunePrivateKey -OutFilePath $env:RUNE_FORCEONLY -KeyFilePath $env:RUNE_SRCKEY -Force
+    'A=NO-THROW'
+}
+catch { 'A=THROWN'; 'AMSG=' + ($_.Exception.Message -replace '\s+', ' ') }
+try {
+    Export-RunePrivateKey -OutFilePath $env:RUNE_EXISTING -KeyFilePath $env:RUNE_SRCKEY -Confirm:$false
+    'B=NO-THROW'
+}
+catch { 'B=THROWN'; 'BMSG=' + ($_.Exception.Message -replace '\s+', ' ') }
+'DONE=1'
+'@
+    $r = Invoke-RuneProbe -Name 'forceorthogonal' -Body $body -EnvVars ((Get-Fixture 'KeyA').Sandbox.Env + @{
+            RUNE_FORCEONLY = $forceOnly; RUNE_EXISTING = $existing; RUNE_SRCKEY = (Get-Fixture 'KeyA').KeyPath
+        }) -Timeout 60
+    Assert (-not $r.TimedOut) '子行程逾時（可能卡在確認提示）'
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['DONE'] -eq '1') ('探針未跑完：' + (Squash $r.All 200))
+
+    Assert ($kv['A'] -eq 'THROWN') '只給 -Force 竟略過了確認提示（-Force 不該身兼兩職）'
+    Assert-Msg -Text $kv['AMSG'] -Keys @('noninteractive') -What '只給 -Force 的訊息'
+    Assert (-not [System.IO.File]::Exists($forceOnly)) "只給 -Force 卻仍產生了匯出檔：$forceOnly"
+
+    Assert ($kv['B'] -eq 'THROWN') '只給 -Confirm:$false 竟覆蓋了既有的 -OutFile'
+    Assert-Msg -Text $kv['BMSG'] -Keys @('stage.exists', 'hint.force') -What '只給 -Confirm:$false 的訊息'
+    Assert ((Get-Sha $existing) -eq $before) '既有的輸出檔被改動了'
+    return ('-Force 不略過確認（被非互動防呆擋下、無檔案產出）；-Confirm:$false 不允許覆蓋（既有檔 SHA 未變）；兩者確實各司其職')
 }
 
 Invoke-TCase 'C83' '空的私鑰檔：直接報「空檔案」，不繞成 DPAPI 解保護失敗' -Tier Full -Needs @('CtWild', 'KeyA') {
