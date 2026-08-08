@@ -1,4 +1,4 @@
-function Invoke-RuneExportPrivateKey {
+function Export-RunePrivateKey {
     <#
         把既有私鑰匯出成可備份的 PKCS#8 PEM。
 

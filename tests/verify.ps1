@@ -1206,7 +1206,7 @@ Register-Fixture 'KeyPass' {
     $body = @'
 Import-Module $env:RUNE_MODULE -Force
 $pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
-Invoke-RuneGenerateKeys -Protect Passphrase -Passphrase $pw
+New-RuneKeyPair -Protect Passphrase -Passphrase $pw
 'HOMEOK=' + ($HOME -eq $env:USERPROFILE)
 'KEYHEAD=' + (Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.rune\private.key') -TotalCount 1)
 Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef (Join-Path $env:USERPROFILE '.rune\public.pem')
@@ -1312,7 +1312,7 @@ Register-Fixture 'ExportedEncKey' {
     $body = @'
 Import-Module $env:RUNE_MODULE -Force
 $pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
-Invoke-RuneExportPrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force
+Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force
 'HEAD=' + (Get-Content -LiteralPath $env:RUNE_OUTKEY -TotalCount 1)
 try {
     Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DESTBAD -KeyFilePath $env:RUNE_OUTKEY

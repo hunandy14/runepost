@@ -164,7 +164,7 @@ C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，
 
     M4 = @{
         Desc = '-GenerateKeys 把私鑰 PEM 全文印到畫面上'
-        File = 'RunePost\Public\Invoke-RuneGenerateKeys.ps1'
+        File = 'RunePost\Public\New-RuneKeyPair.ps1'
         Old = "        `$publicPem = `$ecdh.ExportSubjectPublicKeyInfoPem()"
         New = "        Write-Host (`$ecdh.ExportPkcs8PrivateKeyPem())   # MUTATION M4`n        `$publicPem = `$ecdh.ExportSubjectPublicKeyInfoPem()"
         MustRed = @('C35')

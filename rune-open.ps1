@@ -169,13 +169,13 @@ try {
 
     switch ($PSCmdlet.ParameterSetName) {
         'GenerateKeys' {
-            Invoke-RuneGenerateKeys -Protect $Protect -Passphrase $Passphrase -Force:$Force
+            New-RuneKeyPair -Protect $Protect -Passphrase $Passphrase -Force:$Force
         }
         'ExportPublicKey' {
-            Invoke-RuneExportPublicKey -KeyFilePath $KeyFile -Passphrase $Passphrase
+            Export-RunePublicKey -KeyFilePath $KeyFile -Passphrase $Passphrase
         }
         'ExportPrivateKey' {
-            Invoke-RuneExportPrivateKey -OutFilePath $OutFile -KeyFilePath $KeyFile -Protect $Protect `
+            Export-RunePrivateKey -OutFilePath $OutFile -KeyFilePath $KeyFile -Protect $Protect `
                 -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force
         }
         'Unpack' {

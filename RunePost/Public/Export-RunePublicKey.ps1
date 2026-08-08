@@ -1,4 +1,4 @@
-﻿function Invoke-RuneExportPublicKey {
+﻿function Export-RunePublicKey {
     <#
         從既有私鑰重新導出公鑰。
 
