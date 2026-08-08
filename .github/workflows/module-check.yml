@@ -1,0 +1,67 @@
+# 結構性消滅「manifest 的 FunctionsToExport 與 Public\ 不同步」：push／PR 一律檢查。
+#
+# 前身是 build-check.yml（跑 build.ps1 -Check，確保 dist/ 與 src/ 逐位元組一致）。
+# 組裝式架構已移除，那個漂移風險隨之消失；新架構的等價風險是 psd1 的明確匯出
+# 清單與 Public\ 底下的實際檔案不同步——psd1 刻意不用 '*'（萬用字元會讓模組
+# 自動載入器為命令探索解析整個模組，有實測效能代價），代價就是得手動維護清單。
+# verify.ps1 的 P0 只在有人手動跑 verify 時擋得住，CI 才是不依賴人的防線。
+name: module-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  module-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 模組可載入，且 manifest／實際匯出／Public\ 檔名三方一致
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $manifest = Test-ModuleManifest ./RunePost/RunePost.psd1
+          Import-Module ./RunePost -Force
+          $m = Get-Module RunePost
+
+          $onDisk    = @(Get-ChildItem ./RunePost/Public -Filter *.ps1 -File | ForEach-Object BaseName | Sort-Object)
+          $exported  = @($m.ExportedFunctions.Keys | Sort-Object)
+          $declared  = @($manifest.ExportedFunctions.Keys | Sort-Object)
+
+          if (($onDisk -join ',') -ne ($exported -join ',')) {
+            throw "實際匯出與 Public\ 檔名不一致：匯出 [$($exported -join ',')]，Public\ [$($onDisk -join ',')]"
+          }
+          if (($onDisk -join ',') -ne ($declared -join ',')) {
+            throw "manifest FunctionsToExport 與 Public\ 檔名不同步：manifest [$($declared -join ',')]，Public\ [$($onDisk -join ',')]"
+          }
+          foreach ($n in @('Cmdlets', 'Aliases', 'Variables')) {
+            $c = $m."Exported$n".Count
+            if ($c -ne 0) { throw "模組不該匯出任何 $n，實際 $c 個" }
+          }
+
+          # 一檔一函式、檔名 = 函式名（Export-ModuleMember -Function $Public.BaseName 的前提）
+          $bad = @()
+          foreach ($f in Get-ChildItem ./RunePost -Recurse -Filter *.ps1 -File) {
+            $t = $null; $e = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+            if ($e.Count -gt 0) { $bad += "$($f.Name)：解析錯誤 $($e[0].Message)"; continue }
+            $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false))
+            if ($fn.Count -ne 1) { $bad += "$($f.Name)：含 $($fn.Count) 個函式（應恰好 1 個）"; continue }
+            if ($fn[0].Name -ne $f.BaseName) { $bad += "$($f.Name)：函式名 $($fn[0].Name) 與檔名不符" }
+          }
+          if ($bad.Count -gt 0) { throw ("模組檔案結構違規：" + ($bad -join '; ')) }
+
+          Write-Host "OK：模組 v$($m.Version) 匯出 $($exported.Count) 個函式（$($exported -join ', ')），三方一致"
+
+      - name: 入口腳本語法可解析
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($p in @('./rune-seal.ps1', './rune-open.ps1')) {
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $p), [ref]$t, [ref]$e)
+            if ($e.Count -gt 0) { throw "$p 解析錯誤 $($e.Count) 個：$($e[0].Message)" }
+            Write-Host "OK：$p 語法可解析"
+          }

@@ -1,2 +1,3 @@
 *.ps1 text eol=lf
-dist/*.ps1 linguist-generated=true
+*.psm1 text eol=lf
+*.psd1 text eol=lf
