@@ -2191,6 +2191,89 @@ $mf = Test-ModuleManifest $env:RUNE_MANIFEST
         return ('相對路徑 {0} 字元、來源全長 {1} 字元，含 .rune-tmp 前綴仍完整還原' -f $rel.Length, $srcFile.Length)
     }
 
+    # ---- 以「模組」身分使用受測物（不經入口腳本）----
+    # 上面 74 案全部經由 rune-seal.ps1 / rune-open.ps1，而那兩支自己會設
+    # $ErrorActionPreference = 'Stop' 與 Set-StrictMode。也就是說「改成標準模組」
+    # 的主要理由——使用者可以 Import-Module 之後直接呼叫函式——在整套測試裡
+    # 一次都沒被走到，模組在「呼叫端什麼都沒設」的預設 session 下能不能正常運作
+    # 是零覆蓋。C67 / C68 補這個洞：探針腳本刻意不設任何偏好（wrapper 給的是
+    # 預設的 Continue、StrictMode 也是關的），直接呼叫匯出的函式。
+
+    Invoke-TCase 'C67' '以模組身分直接呼叫 Invoke-RuneSeal / Invoke-RuneOpen 完成 roundtrip（不經入口腳本）' {
+        $src = Join-Path $script:Fx 'tree'
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'asmodule.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+        $dest = New-Dir (Join-Path $script:Work 'unpack\asmodule')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        $probe = Join-Path $script:Work 'usemodule.ps1'
+        # 刻意不寫 $ErrorActionPreference、不寫 Set-StrictMode：這一案要測的就是
+        # 「呼叫端什麼都沒設」時模組自己站得住。
+        [System.IO.File]::WriteAllText($probe, @'
+Import-Module $env:RUNE_MODULE -Force
+"CALLER-EAP=$ErrorActionPreference"
+Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef $env:RUNE_PUB
+Invoke-RuneOpen -InFilePath $env:RUNE_OUT -DestinationPath $env:RUNE_DEST -KeyFilePath $env:RUNE_KEY
+'DONE'
+'@, $script:Utf8Bom)
+
+        $r = Invoke-Transfer -ScriptPath $probe -EnvVars @{
+            RUNE_MODULE = $script:ModuleRoot
+            RUNE_SRC    = $src
+            RUNE_OUT    = $out
+            RUNE_DEST   = $dest
+            RUNE_PUB    = $script:KeyA.Sandbox.PubPath
+            RUNE_KEY    = $script:KeyA.KeyPath
+        }
+        [void](Expect-Success $r '以模組身分 roundtrip')
+        Assert ($r.StdOut -match 'CALLER-EAP=Continue') `
+        ('探針 session 的 EAP 不是預設的 Continue，這一案就失去意義：' + (Squash $r.StdOut 120))
+        Assert ($r.StdOut -match 'DONE') '探針未跑完'
+        Assert ([System.IO.File]::Exists($out)) '直接呼叫 Invoke-RuneSeal 未產生容器'
+
+        $c = Read-Container $out
+        Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2 -and $c.ContentType -eq 1) '產物不是合法的 RUNE v2 容器'
+        $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $dest) -AllowRootPrefix 'tree'
+        Assert ($null -eq $cmp.Diff) $cmp.Diff
+        return ('未經入口腳本、呼叫端偏好為預設（EAP=Continue、StrictMode 關）：{0} 檔位元一致還原；{1}' -f `
+            (Get-TreeMap $src).Count, $cmp.Convention)
+    }
+
+    Invoke-TCase 'C68' '模組被直接呼叫時錯誤路徑仍終止（不會靜默往下跑）' {
+        # 判準不是「有沒有印錯誤」，而是「失敗之後下一行有沒有被執行」——
+        # 只印錯誤卻繼續跑才是最危險的靜默失敗。
+        #
+        # 誠實界定這一案守得住什麼：實測把 .psm1 的 Set-StrictMode 與
+        # $ErrorActionPreference 兩行分別、一起拿掉共三組，整套 76 案結果與對照組
+        # 完全相同——現有錯誤路徑幾乎都走顯式 throw 或 .NET 例外，與 EAP 無關。
+        # 所以本案**不是**那兩行宣告的守門員，不能拿它當「宣告有效」的證據。
+        # 它真正的價值是：模組被直接呼叫（不經入口腳本）這條路徑原本零覆蓋，
+        # 而「失敗必須終止且不留半成品」是這條路徑上的對外契約，值得釘住。
+        $out = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'modfail.txt'
+        if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
+
+        $probe = Join-Path $script:Work 'usemodule_fail.ps1'
+        [System.IO.File]::WriteAllText($probe, @'
+Import-Module $env:RUNE_MODULE -Force
+Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef $env:RUNE_PUB
+'SENTINEL-NOT-TERMINATED'
+'@, $script:Utf8Bom)
+
+        $r = Invoke-Transfer -ScriptPath $probe -EnvVars @{
+            RUNE_MODULE = $script:ModuleRoot
+            RUNE_SRC    = (Join-Path $script:Fx 'single\payload.bin')
+            RUNE_OUT    = $out
+            RUNE_PUB    = (Join-Path $script:Work 'no_such_dir\nokey.pem')
+        }
+        Assert (-not $r.TimedOut) '子行程逾時'
+        Assert ($r.Failed) '公鑰不存在卻沒有任何失敗跡象'
+        Assert (-not ($r.All -match 'SENTINEL-NOT-TERMINATED')) `
+        ('錯誤未終止：Invoke-RuneSeal 失敗後下一行仍被執行（靜默繼續）=> ' + (Squash $r.All 200))
+        Assert (-not [System.IO.File]::Exists($out)) '公鑰不存在卻仍產生了輸出檔'
+        Assert ($r.StdErr -match $script:ErrPatterns['nopub']) ('訊息未指明公鑰環節：' + (Squash $r.StdErr 200))
+        return ('公鑰不存在 → 直接呼叫模組函式時仍為終止性錯誤，後續語句未執行、無輸出檔；' + (Squash $r.StdErr 80))
+    }
+
     Invoke-TCase 'C40' '原始受測腳本（seal + open）自始至終未被修改' {
         $nowSeal = Get-Sha $script:SutSeal
         $nowOpen = Get-Sha $script:SutOpen
