@@ -3,5 +3,8 @@ tests/_work/
 tests/verify-report.txt
 tests/verify-log.txt
 
+# mutate.ps1 執行時產生的對照組與各變異的執行結果（非交付物，不進版控）
+tests/_mutwork/
+
 # 開發過程的暫存測試資料（本 repo 約定放這裡，不進版控）
 /scratchpad/
