@@ -213,6 +213,31 @@ C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，
 不能只要求訊息落在「內容損壞」這一類，必須點名遭竄改，否則這個缺陷抓不到。
 '@
     }
+
+    M8 = @{
+        Desc = 'seal 的相依閉包被拉進解密專屬函式'
+        File = 'RunePost\Public\Invoke-RuneSeal.ps1'
+        Old = '    $plan = Get-RunePackPlan -PackPath $PackPath'
+        New = "    if (`$false) { `$null = Get-RunePrivateKey -KeyFilePath `$PackPath }   # MUTATION M8`n    `$plan = Get-RunePackPlan -PackPath `$PackPath"
+        MustRed = @('C63')
+        MayRed = @()
+        Note = @'
+植入的是「永遠不會執行到」的呼叫，因為 C63 守的是相依方向這個靜態性質，不是執行
+結果。真實的退化就長這樣：有人為了少寫一段，在 seal 這條路徑上重用了解密端的私鑰
+載入函式，程式跑起來一切正常，架構意圖卻已經破了。用死碼植入正好把「行為沒變但
+相依方向變了」單獨隔離出來——C63 以外一案都不該紅。
+'@
+    }
+
+    M9 = @{
+        Desc = 'open 的相依閉包被拉進加密專屬函式'
+        File = 'RunePost\Public\Invoke-RuneOpen.ps1'
+        Old = '    $parsed = ConvertFrom-RuneContainer -Bytes $containerBytes'
+        New = "    if (`$false) { `$null = Get-RunePublicKey -PublicKeyRef `$InFilePath }   # MUTATION M9`n    `$parsed = ConvertFrom-RuneContainer -Bytes `$containerBytes"
+        MustRed = @('C64')
+        MayRed = @()
+        Note = 'C63 的反方向，理由同 M8：以不會執行到的呼叫證明 C64 咬的是相依方向而非行為。'
+    }
 }
 
 # ==============================================================================

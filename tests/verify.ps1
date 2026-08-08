@@ -880,6 +880,42 @@ function Get-PemBlock {
     return $null
 }
 
+# 模組相依圖：函式名 -> 它在自己的內文裡呼叫到的「模組內」函式名。純 AST，不執行
+# 任何模組程式碼。C63 / C64 用它斷言加密端與解密端的相依方向沒有互相汙染。
+function Get-RuneCallGraph {
+    $calls = @{}
+    foreach ($f in Get-ChildItem -LiteralPath $script:ModuleRoot -Recurse -Filter '*.ps1' -File) {
+        $t = $null; $e = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+        Assert ($e.Count -eq 0) ("模組檔案解析失敗：$($f.Name) => " + (Squash $e[0].Message 120))
+        foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+            $calls[$fn.Name] = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                    ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+        }
+    }
+    # 只留「模組內函式 -> 模組內函式」的邊；外部 cmdlet（Get-ChildItem、Join-Path…）不算
+    $graph = @{}
+    foreach ($name in @($calls.Keys)) {
+        $graph[$name] = @($calls[$name] | Where-Object { $calls.ContainsKey($_) } | Sort-Object -Unique)
+    }
+    return $graph
+}
+
+# 由 $Root 出發的遞移呼叫閉包（不含 $Root 自己）。遞迴函式靠 HashSet 收斂。
+function Get-RuneCallClosure {
+    param([hashtable]$Graph, [string]$Root)
+    Assert ($Graph.ContainsKey($Root)) "相依圖裡沒有這個函式：$Root"
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    $queue.Enqueue($Root)
+    while ($queue.Count -gt 0) {
+        foreach ($callee in $Graph[$queue.Dequeue()]) {
+            if ($seen.Add($callee)) { $queue.Enqueue($callee) }
+        }
+    }
+    return @($seen | Sort-Object)
+}
+
 # 探針輸出的 KEY=VALUE 行 -> hashtable
 function ConvertFrom-ProbeOutput {
     param([string]$Text)
@@ -2242,20 +2278,71 @@ Invoke-TCase 'C62' '-PublicKey 收到格式錯誤的 PEM 字串 → 報公鑰格
     return (Expect-SealRefused -Res $r -OutFile $out -What '-PublicKey 收到格式錯誤的 PEM 字串' -Expect @('pubkey.badpem'))
 }
 
-# 負面符號掃描（加密端不含解密端專屬符號，反之亦然）建立在「單檔部署、seal 與
-# open 是兩份互不重疊的產物」之上。模組架構下加密端是複製整個 RunePost\，解密端
-# 的程式碼本來就會一起過去，這個屬性不成立：只掃兩支薄入口腳本會變成必然通過，
-# 掃模組則必然失敗。兩案因此以 INFO 記錄事實，而不是靜悄悄刪掉讓它從報表消失。
-# 若「最小部署」仍是目標，可改成斷言 Public\Invoke-RuneSeal.ps1 的相依閉包不含
-# 任何私鑰／解包函式——那守的是相依方向而非檔案內容，在模組架構下才成立。
+# 相依方向：加密端與解密端在同一個模組裡共存，但呼叫關係不得互相汙染。
+#
+# seal 這條路徑只需要收件人公鑰，永遠不該碰到私鑰、密碼或解封裝；open 這條路徑只
+# 需要自己的私鑰，永遠不該碰到打包、壓縮與加密。相依閉包比「檔案裡不出現某個字串」
+# 更本質：它守的是呼叫關係而不是檔案內容，改名、搬檔、加註解都不會讓它失準，而且
+# 在「加密端複製整個 RunePost\」的部署方式下依然成立。
+#
+# 兩案都先確認名單上的每個名字真的存在於模組中——漏掉這一步，任何一次改名都會讓
+# 斷言靜悄悄退化成恆真；也都先確認閉包本身含有該端該有的函式，否則「零交集」有可能
+# 只是因為閉包算出來是空的。
 
-Invoke-TCase 'C63' '負面符號掃描：加密端不含解密端專屬符號（模組架構下不成立）' -Tier Full {
-    Info-Case ('加密端是複製整個 RunePost\ 資料夾，模組同時含 seal 與 open 兩側程式碼，' +
-        '「加密端不含解密程式碼」不成立；只掃薄入口腳本則形同必然通過。以 INFO 記錄。')
+$script:DecryptOnlyFunctions = @(
+    # 私鑰與密碼
+    'Get-RunePrivateKey'
+    'Get-RunePrivateKeyFormat'
+    'Get-RuneSharedSecretForDecrypt'
+    'Read-RunePassphrase'
+    'ConvertFrom-RuneSecureString'
+    # 解封裝
+    'ConvertFrom-RuneContainer'
+    'Expand-RuneBrotli'
+    'Expand-RuneZip'
+    'Move-RuneExtractedTree'
+)
+
+$script:EncryptOnlyFunctions = @(
+    # 收件人公鑰
+    'Get-RunePublicKey'
+    'Get-RuneMissingPublicKeyMessage'
+    # 打包、壓縮、加密、組容器
+    'Get-RunePackPlan'
+    'New-RuneZipBytes'
+    'Compress-RuneBrotli'
+    'Protect-RuneAesGcm'
+    'New-RuneContainer'
+)
+
+Invoke-TCase 'C63' '相依閉包：Invoke-RuneSeal 不觸及私鑰／解密專屬函式' -Tier Core {
+    $graph = Get-RuneCallGraph
+    $gone = @($script:DecryptOnlyFunctions | Where-Object { -not $graph.ContainsKey($_) })
+    Assert ($gone.Count -eq 0) ('解密端名單裡的函式已不在模組中（改名未同步，斷言會退化成恆真）：' + ($gone -join ','))
+
+    $closure = Get-RuneCallClosure -Graph $graph -Root 'Invoke-RuneSeal'
+    $absent = @($script:EncryptOnlyFunctions | Where-Object { $closure -notcontains $_ })
+    Assert ($absent.Count -eq 0) ('Invoke-RuneSeal 的閉包少了加密端本來就該有的函式，閉包計算有問題：' + ($absent -join ','))
+
+    $hit = @($closure | Where-Object { $script:DecryptOnlyFunctions -contains $_ })
+    Assert ($hit.Count -eq 0) ('Invoke-RuneSeal 的相依閉包觸及了解密／私鑰專屬函式：' + ($hit -join ','))
+    return ('遞移呼叫 {0} 個模組函式，涵蓋加密端 {1} 個必要函式，與 {2} 個解密／私鑰專屬函式零交集：{3}' -f `
+            $closure.Count, $script:EncryptOnlyFunctions.Count, $script:DecryptOnlyFunctions.Count, ($closure -join ','))
 }
 
-Invoke-TCase 'C64' '負面符號掃描：解密端不含加密端專屬符號（模組架構下不成立）' -Tier Full {
-    Info-Case '同 C63：此斷言的前提（兩份互不重疊的單檔產物）不存在。以 INFO 記錄。'
+Invoke-TCase 'C64' '相依閉包：Invoke-RuneOpen 不觸及公鑰／打包加密專屬函式' -Tier Core {
+    $graph = Get-RuneCallGraph
+    $gone = @($script:EncryptOnlyFunctions | Where-Object { -not $graph.ContainsKey($_) })
+    Assert ($gone.Count -eq 0) ('加密端名單裡的函式已不在模組中（改名未同步，斷言會退化成恆真）：' + ($gone -join ','))
+
+    $closure = Get-RuneCallClosure -Graph $graph -Root 'Invoke-RuneOpen'
+    $absent = @($script:DecryptOnlyFunctions | Where-Object { $closure -notcontains $_ })
+    Assert ($absent.Count -eq 0) ('Invoke-RuneOpen 的閉包少了解密端本來就該有的函式，閉包計算有問題：' + ($absent -join ','))
+
+    $hit = @($closure | Where-Object { $script:EncryptOnlyFunctions -contains $_ })
+    Assert ($hit.Count -eq 0) ('Invoke-RuneOpen 的相依閉包觸及了公鑰／打包加密專屬函式：' + ($hit -join ','))
+    return ('遞移呼叫 {0} 個模組函式，涵蓋解密端 {1} 個必要函式，與 {2} 個公鑰／加密專屬函式零交集：{3}' -f `
+            $closure.Count, $script:DecryptOnlyFunctions.Count, $script:EncryptOnlyFunctions.Count, ($closure -join ','))
 }
 
 
