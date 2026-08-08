@@ -683,7 +683,13 @@ function New-TestKeyPair {
         if ($found.Count -gt 0) { $keyPath = $found[0] }
         elseif ($escaped) { $keyPath = $escaped }
     }
-    $pem = Get-PemBlock -Text $res.All
+    # 公鑰 PEM 一律從落地的 ~\.rune\public.pem 讀取，不再從 stdout 擷取——
+    # -GenerateKeys 的成功輸出已改為「只印路徑與指紋，不印 PEM 全文」，
+    # 要看 PEM 內容請自行 Get-Content（見 rune-open.ps1 的 .DESCRIPTION）。
+    $pem = $null
+    if ([System.IO.File]::Exists($sb.PubPath)) {
+        $pem = Get-PemBlock -Text ([System.IO.File]::ReadAllText($sb.PubPath))
+    }
     return [pscustomobject]@{
         Name     = $Name
         Sandbox  = $sb
@@ -835,6 +841,10 @@ function Invoke-VerifyTrack {
     $script:PubSpkiA = $null
     $script:EcdhA = $null
     $script:KdfInfo = $null
+    $script:KeyForce = $null
+    $script:KeyForceBackup = $null
+    $script:CtBeforeRotate = $null
+    $script:CtBeforeRotateSrcSha = $null
 
     Write-Host ''
     Write-Host '-- 前置 --' -ForegroundColor Cyan
@@ -901,7 +911,7 @@ function Invoke-VerifyTrack {
         Assert ($null -ne $script:SutOpen) '前置 P1b 未通過'
         $script:KeyA = New-TestKeyPair -Name 'A' -ScriptPath $script:SutOpen
         Assert ($script:KeyA.HasKey) ('未在 ~\.rune\private.key 產生私鑰；輸出=' + (Squash $script:KeyA.Result.All 160))
-        Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未印出 PUBLIC KEY PEM 區塊；輸出=' + (Squash $script:KeyA.Result.All 160))
+        Assert ($null -ne $script:KeyA.PublicPem) ('-GenerateKeys 未在 ~\.rune\public.pem 寫出合法的 PUBLIC KEY PEM；輸出=' + (Squash $script:KeyA.Result.All 160))
         $script:PubPemA = $script:KeyA.PublicPem
         $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
         $ec.ImportFromPem($script:PubPemA)
@@ -921,7 +931,10 @@ function Invoke-VerifyTrack {
         return ('金鑰 B 就緒；與 A 的 blob 不同')
     }
 
-    Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem（不再製作任何腳本副本）' {
+    Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem，且與 -GenerateKeys 印出的指紋對得起來' {
+        # -GenerateKeys 不再印 PEM 全文，因此「印出的公鑰 vs 落地的公鑰」已無從逐字比對；
+        # 改以「印出的指紋 == 獨立重算 SHA-256(落地 public.pem 的 SPKI DER)[0..15]」驗證
+        # 兩者確實是同一把——這比原本的字串比對更嚴格，也直接守住指紋這條防線。
         Assert ($null -ne $script:PubPemA) '前置 P4 未通過'
         $pub = $script:KeyA.Sandbox.PubPath
         Assert ([System.IO.File]::Exists($pub)) "-GenerateKeys 未在沙箱家目錄寫出 public.pem：$pub"
@@ -930,8 +943,15 @@ function Invoke-VerifyTrack {
         $ec = [System.Security.Cryptography.ECDiffieHellman]::Create()
         $ec.ImportFromPem($onDisk)
         Assert ([Convert]::ToHexString($ec.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($script:PubSpkiA)) `
-            'public.pem 內的公鑰與 -GenerateKeys 印出的 PEM 不是同一把'
-        return ('沙箱 ~\.rune\public.pem 就緒且與印出的公鑰一致；seal / open 皆直接對原檔執行，全程未製作任何腳本副本')
+            'public.pem 內的公鑰與 P4 取得的公鑰不是同一把'
+        $m = [regex]::Match($script:KeyA.Result.All, 'RUNE-KEY\s+([0-9A-F]{4}(?:-[0-9A-F]{4}){7})')
+        Assert ($m.Success) ('-GenerateKeys 未印出 RUNE-KEY 指紋：' + (Squash $script:KeyA.Result.All 200))
+        $digest = [System.Security.Cryptography.SHA256]::HashData($script:PubSpkiA)
+        $hex = [Convert]::ToHexString($digest, 0, 16)
+        $expect = ((0..7) | ForEach-Object { $hex.Substring($_ * 4, 4) }) -join '-'
+        Assert ($m.Groups[1].Value -eq $expect) `
+        ('印出的指紋與落地 public.pem 對不起來：印出 {0}，重算 {1}' -f $m.Groups[1].Value, $expect)
+        return ('沙箱 ~\.rune\public.pem 就緒，指紋 RUNE-KEY {0} 與印出值逐字相符；seal / open 皆直接對原檔執行，全程未製作任何腳本副本' -f $expect)
     }
 
     # 前置未過就沒有意義往下跑（只看本軌新增的 P 系列結果，不受另一軌影響）
@@ -1489,19 +1509,126 @@ function Invoke-VerifyTrack {
         return ('未指定 -KeyFile，從 ~\.rune\private.key 讀取成功')
     }
 
-    Invoke-TCase 'C34' '-GenerateKeys 私鑰已存在時拒絕覆蓋' {
+    # ---- -GenerateKeys 對「私鑰已存在」的處置（期望值已於 ed9442d 翻轉）----
+    # 舊規格：一律拒絕。新規格（見 rune-open.ps1 的 .DESCRIPTION）：
+    #   互動環境 → 印出現有指紋後詢問（預設不繼續）；
+    #   非互動環境（stdin 被重導向）且無 -Force → 直接拒絕，不卡在提示；
+    #   帶 -Force → 略過提示，先把舊的 private.key / public.pem 改名為
+    #               <原檔名>.bak-<時間戳>（是改名不是刪除），才寫入新金鑰對。
+    # 本套件的子行程一律關閉 stdin，因此 C34 測到的是「非互動 + 無 -Force」那條路徑；
+    # C65 / C66 補上 -Force 這條路徑的落地行為與救援路徑。
+
+    Invoke-TCase 'C34' '-GenerateKeys 私鑰已存在 + 非互動且無 -Force → 拒絕，且完全不動既有檔案' {
+        $runeDir = Join-Path $script:KeyA.Sandbox.Path '.rune'
         $before = Get-Sha $script:KeyA.KeyPath
+        $bakBefore = @([System.IO.Directory]::EnumerateFiles($runeDir, '*.bak-*')).Count
         $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-GenerateKeys') -EnvVars $script:KeyA.Sandbox.Env -WorkDir $script:KeyA.Sandbox.Path
         [void](Assert-NoHomeEscape -When 'C34')
         $ev = Expect-Failure $r 'exists' '私鑰已存在'
         Assert ((Get-Sha $script:KeyA.KeyPath) -eq $before) '既有私鑰被覆蓋了'
-        return ("$ev；既有私鑰 SHA 未變")
+        # 拒絕就是拒絕：不得留下任何備份檔（那代表已經動手改名了才失敗）
+        $bakAfter = @([System.IO.Directory]::EnumerateFiles($runeDir, '*.bak-*')).Count
+        Assert ($bakAfter -eq $bakBefore) ('被拒絕卻仍產生了備份檔（{0} → {1}）' -f $bakBefore, $bakAfter)
+        # 訊息必須指出 -Force 這條出路，否則使用者在非互動環境下無路可走
+        Assert ($r.StdErr -match '-Force') ('拒絕訊息未指引可用 -Force：' + (Squash $r.StdErr 200))
+        return ("$ev；既有私鑰 SHA 未變、無備份檔產生、訊息有指引 -Force")
     }
 
-    Invoke-TCase 'C35' '-GenerateKeys 印出公鑰 PEM、public.pem 路徑與指紋' {
+    Invoke-TCase 'C65' '-GenerateKeys -Force：產生新金鑰，舊私鑰改名保留為 private.key.bak-* 且位元組不變' {
+        $kf = New-TestKeyPair -Name 'force' -ScriptPath $script:SutOpen
+        Assert (-not $kf.Result.Failed) ('前置：force 沙箱 -GenerateKeys 失敗 => ' + (Squash $kf.Result.All 160))
+        Assert ($kf.HasKey) '前置：force 沙箱未產生第一把私鑰'
+        Assert ($null -ne $kf.PublicPem) '前置：force 沙箱未寫出 public.pem'
+        $script:KeyForce = $kf
+        $runeDir = Join-Path $kf.Sandbox.Path '.rune'
+
+        # 先用第一把金鑰加密一份密文，供 C66 用備份私鑰解回來
+        $src = Join-Path $script:Fx 'single\payload.bin'
+        $old = Join-Path (New-Dir (Join-Path $script:Work 'out')) 'beforerotate.txt'
+        if ([System.IO.File]::Exists($old)) { [System.IO.File]::Delete($old) }
+        [void](Expect-Success (Invoke-Transfer -ScriptPath $script:SutSeal `
+                    -Arguments @('-Pack', $src, '-OutFile', $old, '-PublicKey', $kf.Sandbox.PubPath) `
+                    -EnvVars $kf.Sandbox.Env) 'Pack(輪替前的公鑰)')
+        $script:CtBeforeRotate = $old
+        $script:CtBeforeRotateSrcSha = Get-Sha $src
+
+        $oldKeyBytes = [System.IO.File]::ReadAllBytes($kf.KeyPath)
+        $oldKeySha = Get-Sha $kf.KeyPath
+        $oldPubText = [System.IO.File]::ReadAllText($kf.Sandbox.PubPath)
+
+        $r = Invoke-Transfer -ScriptPath $script:SutOpen -Arguments @('-GenerateKeys', '-Force') -EnvVars $kf.Sandbox.Env -WorkDir $kf.Sandbox.Path
+        [void](Assert-NoHomeEscape -When 'C65')
+        [void](Expect-Success $r '-GenerateKeys -Force')
+
+        # 新金鑰確實產生且與舊的不同
+        Assert ([System.IO.File]::Exists($kf.KeyPath)) '-Force 後 private.key 不存在'
+        $newKeySha = Get-Sha $kf.KeyPath
+        Assert ($newKeySha -ne $oldKeySha) '-Force 後 private.key 內容未改變（沒有真的換新金鑰）'
+
+        # 舊私鑰是「改名保留」而不是刪除
+        $keyBaks = @([System.IO.Directory]::EnumerateFiles($runeDir, 'private.key.bak-*'))
+        Assert ($keyBaks.Count -eq 1) ('private.key.bak-* 應恰好 1 個，實得 {0}：{1}' -f $keyBaks.Count, (($keyBaks | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
+        $bakName = Split-Path -Leaf $keyBaks[0]
+        Assert ($bakName -match '^private\.key\.bak-\d{8}-\d{6}') ("備份檔名不是 private.key.bak-<時間戳> 格式：$bakName")
+        $script:KeyForceBackup = $keyBaks[0]
+
+        # 備份檔與舊私鑰逐位元組相同
+        $bakBytes = [System.IO.File]::ReadAllBytes($keyBaks[0])
+        Assert ($bakBytes.Length -eq $oldKeyBytes.Length) ('備份長度 {0} 與舊私鑰 {1} 不符' -f $bakBytes.Length, $oldKeyBytes.Length)
+        $same = $true
+        for ($i = 0; $i -lt $bakBytes.Length; $i++) { if ($bakBytes[$i] -ne $oldKeyBytes[$i]) { $same = $false; break } }
+        Assert $same '備份檔內容與舊私鑰不是逐位元組相同'
+        Assert ((Get-Sha $keyBaks[0]) -eq $oldKeySha) '備份檔 SHA-256 與舊私鑰不符'
+
+        # public.pem 同樣改名保留，且內容是舊的那把
+        $pubBaks = @([System.IO.Directory]::EnumerateFiles($runeDir, 'public.pem.bak-*'))
+        Assert ($pubBaks.Count -eq 1) ('public.pem.bak-* 應恰好 1 個，實得 {0}' -f $pubBaks.Count)
+        Assert ([System.IO.File]::ReadAllText($pubBaks[0]) -eq $oldPubText) '公鑰備份內容與舊 public.pem 不同'
+        Assert ((Split-Path -Leaf $pubBaks[0]) -eq ($bakName -replace '^private\.key', 'public.pem')) `
+        ('私鑰／公鑰備份未共用同一個時間戳：{0} vs {1}' -f $bakName, (Split-Path -Leaf $pubBaks[0]))
+
+        # 新的 public.pem 已重寫成新金鑰的，指紋也跟著變
+        $newPub = Get-PemBlock -Text ([System.IO.File]::ReadAllText($kf.Sandbox.PubPath))
+        Assert ($null -ne $newPub) '-Force 後 public.pem 不是合法 PEM'
+        Assert ($newPub -ne (Get-PemBlock -Text $oldPubText)) '-Force 後 public.pem 仍是舊公鑰'
+        Assert ($r.All -match 'RUNE-KEY') '-Force 後未印出新指紋'
+        Assert ($r.All -match [regex]::Escape($bakName)) ('輸出未告知備份檔位置（使用者無從得知舊金鑰去哪了）：' + (Squash $r.All 200))
+        return ("舊私鑰改名為 $bakName（逐位元組相同）、public.pem 同時間戳備份、新金鑰已寫入且指紋改變")
+    }
+
+    Invoke-TCase 'C66' '輪替後仍可用 -KeyFile 指向 private.key.bak-* 解開舊密文' {
+        Assert ($null -ne $script:KeyForceBackup) '前置 C65 未產生備份私鑰'
+        $dest = New-Dir (Join-Path $script:Work 'unpack\rotated_backup')
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+        # 先確認新金鑰確實解不開舊密文（證明金鑰真的換了，備份不是多餘的）
+        $destNew = New-Dir (Join-Path $script:Work 'unpack\rotated_newkey')
+        Get-ChildItem -LiteralPath $destNew -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        $rn = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-Unpack', $script:CtBeforeRotate, '-Destination', $destNew, '-KeyFile', $script:KeyForce.KeyPath) `
+            -EnvVars $script:KeyForce.Sandbox.Env
+        Assert ($rn.Failed) '輪替後的新私鑰竟然解得開舊密文（金鑰沒真的換）'
+        Assert ((Get-TreeMap $destNew).Count -eq 0) '新私鑰解不開卻仍寫出檔案'
+
+        # 備份私鑰解得開，且內容位元一致
+        $rb = Invoke-Transfer -ScriptPath $script:SutOpen `
+            -Arguments @('-Unpack', $script:CtBeforeRotate, '-Destination', $dest, '-KeyFile', $script:KeyForceBackup) `
+            -EnvVars $script:KeyForce.Sandbox.Env
+        [void](Expect-Success $rb 'Unpack(-KeyFile 指向備份私鑰)')
+        $d = Compare-MapExact @{ 'payload.bin' = $script:CtBeforeRotateSrcSha } (Get-TreeMap $dest)
+        Assert ($null -eq $d) $d
+        return ('新私鑰解不開舊密文；改用 -KeyFile ' + (Split-Path -Leaf $script:KeyForceBackup) + ' 則位元一致還原，救援路徑成立')
+    }
+
+    Invoke-TCase 'C35' '-GenerateKeys 只印路徑與指紋，不印 PEM 全文' {
+        # 期望值翻轉（見 git log ed9442d「rune-open 使用體驗調整：輸出精簡」）：
+        # 成功輸出改為「私鑰路徑 / 公鑰路徑 / 指紋」三行，PEM 全文不再印出——
+        # 路徑已經給了，要看內容用 Get-Content。這裡連「不得印出」都一併斷言，
+        # 否則哪天又把 PEM 塞回去也沒人會發現。
         $o = $script:KeyA.Result.All
-        Assert ($null -ne (Get-PemBlock -Text $o)) '未印出 PUBLIC KEY PEM'
+        Assert ($null -eq (Get-PemBlock -Text $o)) ('輸出仍含 PUBLIC KEY PEM 全文（應只印路徑與指紋）：' + (Squash $o 200))
         Assert ($o -match 'public\.pem') '未指引使用者把 public.pem 交給加密端'
+        Assert ($o -match 'private\.key') '未印出私鑰檔路徑'
         Assert ($o -match 'RUNE-KEY') '未印出公鑰指紋（RUNE-KEY ...），加密端無從比對'
         return (Squash (($o -split "`r?`n" | Where-Object { $_ -match 'public\.pem|RUNE-KEY' } | Select-Object -First 1)) 110)
     }
