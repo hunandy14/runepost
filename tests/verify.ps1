@@ -279,18 +279,28 @@ function Invoke-Transfer {
 
 $script:Msg = [ordered]@{
     # --- 錯誤環節分類 ---
-    'stage.base64'  = 'base64|encod|decod'
-    'stage.format'  = 'magic|RUNE|header|format|not valid|not a valid|invalid|does not match'
-    'stage.version' = 'version|unsupported|0x0|magic|format'
-    'stage.key'     = 'private key|public key|key|DPAPI|passphrase|decrypt|unprotect|not found|cannot find|cannot read'
-    'stage.tag'     = 'corrupt|tamper|authentication|verification|integrity|GCM|tag'
-    'stage.unzip'   = 'decompress|Brotli|compress|zip|extract|archive|corrupt'
+    #
+    # 一律用「多詞片語」而不是單字。單字樣式的問題不是它今天會不會誤命中，而是
+    # 它把「樣式有效」這件事押在受測資料剛好不含那個字上——C37 就是這樣失效的：
+    # stage.unsafe 曾經含單字 escape，而該案的 zip entry 就叫 ../escaped.txt，
+    # 退化後的訊息照樣印出 entry 名稱，於是樣式被受測資料自己命中，M7 紅不了它。
+    # 每條片語都取自對應訊息的固定骨幹，措辭改了就會紅，這正是期望訊息表要的。
+    'stage.base64'  = 'Base64 decoding failed'
+    'stage.format'  = 'container format is not valid|header magic does not match|public key in the container is not valid'
+    'stage.version' = 'container version does not match|supports version'
+    'stage.key'     = 'private key|public key|DPAPI unprotect|ECDH key agreement'
+    'stage.tag'     = 'authentication tag|verification failed|tampered with|may be corrupted|is corrupted|AES-GCM decryption failed'
+    'stage.unzip'   = 'Brotli decompression failed|ZIP extraction failed|archive format is not valid|may be corrupted'
     'stage.nopub'   = 'public key|public\.pem'
-    'stage.exists'  = 'already exists|exists|Force|overwrite'
-    'stage.nomatch' = 'cannot find|no file|nothing to pack|matched no|match|empty'
-    'stage.input'   = 'cannot find|not found|does not exist|not valid|invalid|path'
-    # PowerShell 參數繫結器自己的訊息，隨 host 的 UI 文化而在地化，與本工具的文案
-    # 無關；兩種語系的說法都留著，才不會因為開發機的語系設定而假紅。
+    'stage.exists'  = 'already exists|Specify -Force to overwrite'
+    'stage.nomatch' = 'matching the wildcard|no file to pack|nothing to pack'
+    'stage.input'   = 'Cannot find the specified path|Cannot find the input file'
+    # PowerShell 參數繫結器自己的訊息，不是本工具的文案，**隨 host 的 UI 文化在地化**
+    # ——同一個繫結失敗在 zh-TW 的 pwsh 上印中文、在 en-US 上印英文。因此這裡刻意
+    # 並列中英兩種說法：**這不是英文化的漏網，請不要把中文那幾段刪掉**，刪了會讓
+    # 這條樣式在中文語系的開發機上假紅。whatif.line 同理。
+    # （errorframe 不在此列：它比對的 CategoryInfo、ScriptStackTrace 等是屬性名稱，
+    # 　不隨語系變動，所以只有英文。）
     'stage.param'   = 'Parameter set|參數|ParameterBinding|不能同時|互斥|cannot be resolved|Missing an argument|遺失|必要|Mandatory|ParameterArgumentValidation|cannot be found'
     # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞。
     #
@@ -300,8 +310,11 @@ $script:Msg = [ordered]@{
     # M7 於是紅不了 C37（M7 的其餘三案 ..\pwned.txt、..\evil\、../evil2/ 沒有這個
     # 字，所以會紅，單看那三案還以為樣式有效）。這正是變異測試存在的理由。
     'stage.unsafe'  = 'unsafe archive path|path traversal|zip.?slip'
-    # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息
-    'stage.curve'   = 'P-?256|prime256|nistP256|curve'
+    # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息。
+    # curve 不能只寫單字：M11 退化後的訊息是「…the OID is <oid>」，只要樣式裡有
+    # 單字 curve 而訊息又剛好提到 curve（例如某天改成 curve mismatch）就會假綠。
+    # 取 'curve OID' 這個片語，並保留曲線名稱本身這幾個必須出現的 token。
+    'stage.curve'   = 'P-?256|prime256|nistP256|curve OID'
 
     # --- 出路指引：錯誤訊息要告訴使用者下一步能做什麼 ---
     'hint.force'         = '-Force'
@@ -332,19 +345,23 @@ $script:Msg = [ordered]@{
     # 'content' 一個字：GCM 認證失敗的訊息開頭是「Content verification failed」，
     # 只比對 content 會讓 typeorversion 這條反面樣式無條件命中，C52 就永遠假綠。
     'contenttype'         = 'content type|content-type'
-    'newerversion'        = 'newer version|update|newer'
+    'newerversion'        = 'newer version|Update rune-open'
     # tampered 與 typeorversion 必須互不包含：前者只認 tamper 與 authentication tag，
     # 後者只認 content type / newer version / unsupported，兩組字在兩則訊息裡各自
     # 只出現在自己那一則。
     'tampered'            = 'tamper|authentication tag'
     # 反面用：contentType 被竄改時不得被說成「型別不支援 / 版本較新」
     'typeorversion'       = 'content type|content-type|newer version|unsupported'
-    'wildcard.skipdir'    = 'WARNING|skipped|not recursive'
+    # WARNING 是 PowerShell 警告串流的前綴（證明它真的走警告串流而不是一般輸出），
+    # 其餘取片語而非單字 skip。
+    'wildcard.skipdir'    = 'WARNING|Skipped the directory|not recursive'
     # 私鑰／公鑰不得整份印到畫面上
     'pem.privateblock'    = '-----BEGIN[A-Z ]*PRIVATE KEY-----'
     'pem.publicblock'     = '-----BEGIN PUBLIC KEY-----'
-    # PowerShell 的 -WhatIf 預演行是框架輸出，隨 host 的 UI 文化在地化，兩種語系
-    # 的說法都留著。與本工具的文案無關。
+    # PowerShell 的 -WhatIf 預演行前綴由框架產生，**隨 host 的 UI 文化在地化**
+    # （en-US 印 "What if:"、zh-TW 印「如果:」），不是本工具的文案。因此刻意並列
+    # 中英兩種說法：**這不是英文化的漏網，請不要把中文那一段刪掉**，刪了會讓 C84
+    # 在中文語系的開發機上假紅。stage.param 同理。
     'whatif.line'         = 'What if|如果'
     # 反面用：PowerShell 錯誤記錄框架的痕跡。入口腳本以 [Console]::Error.WriteLine
     # 印例外訊息本身，這些標記一個都不該出現在 stderr。純否定樣式，因此在地化的
@@ -1739,13 +1756,35 @@ Invoke-TCase 'P7' '變異目錄與產品程式碼同步：每個 Old 恰好命�
         植入期間本案不適用：產品程式碼此時正處於被刻意改壞的狀態，Old 當然找不到。
         以 mutate.ps1 自己的 RUNNING 標記偵測並 SKIP。對照組跑在 Set-RunLock 之前，
         因此「未植入時目錄是自洽的」這件事仍然每輪都被驗到。
+
+        但「看到 RUNNING 就 SKIP」本身有個洞：mutate.ps1 的 Clear-RunLock 只在最終
+        雜湊等於基線時才執行（那個 fail-safe 是對的——雜湊不符時 repo 真的不可信，
+        旗標就該留著），因此變異工具被強制中斷後 RUNNING 會留在磁碟上，本案從此
+        永遠 SKIP。摘要行雖然會顯示 SKIP 1，但只看退出碼的 CI 完全察覺不到，而這
+        一案正是守護整套變異工具可信度的那一案，被靜默停用最不該發生。
+
+        因此改看 RUNNING 的**修改時間**：mutate.ps1 每植入一項就把它往前推一次
+        （Update-RunLock 心跳），所以在真正執行中的變異測試裡，這個時間距今不會
+        超過「單輪驗收套件的執行時間」（Full 約兩分鐘）。超過門檻即判定為殘留，
+        直接 FAIL 並說明怎麼清掉，而不是繼續靜默 SKIP。
     #>
     $mutPath = Join-Path $script:RepoRoot 'tests\mutate.ps1'
     Assert ([System.IO.File]::Exists($mutPath)) "找不到變異目錄檔案：$mutPath"
 
+    # 門檻取單輪驗收套件執行時間（Full 約兩分鐘）的十餘倍，留足機器忙碌時的餘裕；
+    # 不必大於整輪變異測試的總時間，因為有心跳。
+    $staleMinutes = 30
     $lockFile = Join-Path $script:RepoRoot 'tests\_mutwork\RUNNING'
     if ([System.IO.File]::Exists($lockFile)) {
-        Skip-Case '變異植入期間（tests\_mutwork\RUNNING 存在），產品程式碼正處於被植入狀態，本案不適用'
+        $lockAge = [DateTime]::UtcNow - [System.IO.File]::GetLastWriteTimeUtc($lockFile)
+        Assert ($lockAge.TotalMinutes -le $staleMinutes) (
+            ("殘留的變異測試旗標：{0}`n" +
+            "最後更新於 {1:yyyy-MM-dd HH:mm:ss}（{2:N0} 分鐘前），超過 {3} 分鐘門檻，" +
+            "代表上一次變異測試被強制中斷而沒有清掉旗標。`n" +
+            "本案會因為這個旗標而 SKIP，等於整套變異工具的守門斷言被靜默停用。`n" +
+            "跑一次 pwsh -File .\tests\mutate.ps1 -List 即可自動還原殘骸並清除旗標。") -f `
+                $lockFile, [System.IO.File]::GetLastWriteTime($lockFile), $lockAge.TotalMinutes, $staleMinutes)
+        Skip-Case ('變異植入期間（tests\_mutwork\RUNNING 於 {0:N1} 分鐘前更新），產品程式碼正處於被植入狀態，本案不適用' -f $lockAge.TotalMinutes)
     }
 
     $mt = $null; $me = $null
@@ -3484,6 +3523,16 @@ Write-Host $summary -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 $expectedRun = if ($script:RunTier -eq 'Core') { $coreCount } else { $script:Registered.Count }
 if (-not $Filter -and $script:Results.Count -ne $expectedRun) {
     Write-Host ('警告：本層級應執行 {0} 案，實際只執行 {1} 案' -f $expectedRun, $script:Results.Count) -ForegroundColor Red
+}
+# SKIP 一律醒目列出案號與理由。SKIP 本來就該罕見，而「被靜默略過的斷言」與「通過的
+# 斷言」在只看退出碼的地方長得一模一樣——P7 因殘留旗標而永久 SKIP 就是這個形狀。
+# 退出碼刻意不因 SKIP 而改變：有些 SKIP 是環境限制的合理結果（例如 C49 建不出夠深
+# 的路徑），把它們一律變成失敗只會逼人去關掉這個提示。
+if ($skip) {
+    Write-Host ('注意：本次有 {0} 案 SKIP，未被驗證——SKIP 應屬罕見，請逐案確認是預期的環境限制：' -f $skip) -ForegroundColor Yellow
+    $script:Results | Where-Object Result -EQ 'SKIP' | ForEach-Object {
+        Write-Host ('  - {0}  {1}' -f $_.No, (Squash $_.Evidence 150)) -ForegroundColor Yellow
+    }
 }
 Write-Host ('工作目錄：{0}' -f $script:Work)
 

@@ -45,7 +45,9 @@ function Invoke-RuneSeal {
         throw "The output file already exists: $OutFilePath.`nSpecify -Force to overwrite it."
     }
 
-    Write-Information "Packing $($plan.Entries.Count) items..."
+    # 單複數要跟著數量走：單檔加密是最常見的用法，而它印出來的是這一行。
+    $itemCount = $plan.Entries.Count
+    Write-Information ('Packing {0} {1}...' -f $itemCount, $(if ($itemCount -eq 1) { 'item' } else { 'items' }))
     $zipBytes = New-RuneZipBytes -Entries $plan.Entries
     $originalSize = $zipBytes.Length
 

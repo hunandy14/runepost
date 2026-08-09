@@ -290,7 +290,11 @@ try {
         'Unpack' {
             $result = Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination `
                 -KeyFilePath $KeyFile -Passphrase $Passphrase
-            Write-Host "Decryption complete. Files were restored to: $($result.Destination)."
+            # 原本無條件說 Files，還原單一檔案時不通；順手把模組早就算好、卻一直
+            # 沒印出來的還原檔數一併報出來（只有空目錄的封存會是 0，複數正確）。
+            $n = $result.FileCount
+            Write-Host ('Decryption complete. Restored {0} {1} to: {2}.' -f `
+                    $n, $(if ($n -eq 1) { 'file' } else { 'files' }), $result.Destination)
         }
     }
 }

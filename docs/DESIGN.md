@@ -911,6 +911,22 @@ P7 在變異植入期間以 `tests/_mutwork/RUNNING` 標記偵測並 SKIP（產�
 被刻意改壞的狀態，`Old` 當然找不到）；對照組跑在 `Set-RunLock` 之前，因此「未植入時
 目錄是自洽的」這件事仍然每輪都被驗到。
 
+**殘留旗標必須是 FAIL 而不是繼續 SKIP。** `Clear-RunLock` 只在最終雜湊等於基線時執行
+——那個 fail-safe 是對的，雜湊不符時 repo 真的不可信，旗標就該留著——但代價是變異
+工具被強制中斷後 `RUNNING` 會留在磁碟上，於是 P7 從此永遠 SKIP。摘要行雖然會顯示
+`SKIP 1`，只看退出碼的 CI 卻完全察覺不到，而 P7 正是守護整套變異工具可信度的那一案，
+被靜默停用最不該發生。因此：
+
+- `mutate.ps1` 每植入一項就以 `Update-RunLock` 把 `RUNNING` 的**修改時間**往前推一次
+  （檔案內容記的是整輪開始時間，修改時間則是心跳）。
+- P7 看修改時間：距今 **30 分鐘**內視為執行中而 SKIP，超過即判定為殘留並 **FAIL**，
+  訊息說明「跑一次 `mutate.ps1 -List` 就會自動還原殘骸並清除旗標」。有心跳之後，
+  門檻只需要大於「單輪驗收套件的執行時間」（Full 約兩分鐘），不必大於整輪變異測試
+  的總時間（十七項可達數十分鐘）。
+- 驗收套件的摘要行對 **任何** `SKIP > 0` 印出醒目警示並逐案列出理由。**退出碼刻意
+  不因 SKIP 而改變**：有些 SKIP 是環境限制的合理結果（例如 C49 建不出夠深的路徑），
+  一律變成失敗只會逼人去關掉這個提示。
+
 ### 8.3 CI
 
 `.github/workflows/module-check.yml` 在每次 push 與 pull request 上執行：
@@ -947,6 +963,13 @@ P7 在變異植入期間以 `tests/_mutwork/RUNNING` 標記偵測並 SKIP（產�
 - **參數、路徑、檔名原樣呈現**（`-GenerateKeys`、`public.pem`、`~\.rune\private.key`），
   不用 "that file"、"the parameter above" 這類指代。`RUNE`、`RUNE-KEY`、參數名、
   檔名與路徑一律不翻譯。
+- **數字後面的名詞要跟著數量變單複數。** `Packing 1 item...` / `Packing 2 items...`、
+  `Restored 1 file to: …` / `Restored 2 files to: …`。單檔加密與單檔還原都是最常見
+  的用法，寫死複數等於每個最常見的情境都印出一句壞英文。零一律用複數（`0 files`、
+  `0 bytes`），這是英文的規則。唯一的例外是**固定寬度摘要欄的單位標籤**
+  （`Packed, before compression : 261 bytes`）：那是欄位標題不是句子，而且容器結構
+  決定了三個尺寸都不可能是 1（最小的 ZIP 是 22 bytes、容器 header 加 ephemeral 公鑰
+  與 nonce／tag 已逾 120 bytes），所以不必為不可達的情形加分支。
 - **點名環節。** 使用者要能從訊息判斷失敗發生在打包、公鑰載入、私鑰載入、Base64
   解碼、GCM 認證、Brotli 解壓還是解包搬移。
 - **給出路。** 凡是使用者有辦法處理的失敗，訊息必須說明下一步能做什麼（補上

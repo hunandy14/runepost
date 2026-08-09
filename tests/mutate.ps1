@@ -431,6 +431,20 @@ function Clear-RunLock {
     if (Test-Path -LiteralPath $script:LockFile) { Remove-Item -LiteralPath $script:LockFile -Force }
 }
 
+# 心跳：每植入一項就把 RUNNING 的修改時間往前推一次。
+#
+# 檔案「內容」記的是整輪的開始時間，「修改時間」則是最後一次植入的時間，兩者用途
+# 不同。verify.ps1 的 P7 看到 RUNNING 就 SKIP（植入期間產品程式碼本來就對不上目錄），
+# 但一個被強制中斷而永遠留著的 RUNNING 會讓 P7 從此靜默 SKIP——那是整套變異工具的
+# 守門案例，被靜默停用最糟。有了心跳，P7 就能用「修改時間過舊」判定為殘留並轉 FAIL，
+# 而門檻只需要大於「單輪驗收套件的執行時間」（Full 約兩分鐘），不必大於整輪變異測試
+# 的總時間（十七項可達數十分鐘）。
+function Update-RunLock {
+    if (Test-Path -LiteralPath $script:LockFile) {
+        [System.IO.File]::SetLastWriteTimeUtc($script:LockFile, [DateTime]::UtcNow)
+    }
+}
+
 # $Targets 是 @{ Path; Bytes } 的清單：一項變異可以同時動好幾個檔案（例如同一類
 # 錯誤訊息散在三支檔案裡），每個檔案的原始位元組都要各自留一份。
 function Set-Inflight {
@@ -646,6 +660,7 @@ foreach ($name in $names) {
 
     $run = $null
     try {
+        Update-RunLock
         Set-Inflight -Targets $targetList -Name $name
         foreach ($t in $targetList) {
             $mut = $t.Text
