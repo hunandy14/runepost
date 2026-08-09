@@ -346,10 +346,15 @@ $script:Msg = [ordered]@{
     # 只比對 content 會讓 typeorversion 這條反面樣式無條件命中，C52 就永遠假綠。
     'contenttype'         = 'content type|content-type'
     'newerversion'        = 'newer version|Update rune-open'
-    # tampered 與 typeorversion 必須互不包含：前者只認 tamper 與 authentication tag，
-    # 後者只認 content type / newer version / unsupported，兩組字在兩則訊息裡各自
-    # 只出現在自己那一則。
-    'tampered'            = 'tamper|authentication tag'
+    # tampered 與 typeorversion 必須互不包含：前者只認 tampered with 與
+    # authentication tag，後者只認 content type / newer version / unsupported，
+    # 兩組字在兩則訊息裡各自只出現在自己那一則。
+    #
+    # 這裡刻意寫片語 'tampered with' 而不是詞幹 'tamper'：C12／C13／C14 的目的資料夾
+    # 就叫 tamper_b64 / tamper_magic / tamper_ver，而 -Unpack 有一條錯誤路徑會把
+    # Destination 原樣印進訊息（搬移失敗那則）。今天那條路徑在這幾案上不會走到，
+    # 但「樣式有效與否取決於受測資料剛好沒命中」正是 C37 失效的形狀，不留這個縫。
+    'tampered'            = 'tampered with|authentication tag'
     # 反面用：contentType 被竄改時不得被說成「型別不支援 / 版本較新」
     'typeorversion'       = 'content type|content-type|newer version|unsupported'
     # WARNING 是 PowerShell 警告串流的前綴（證明它真的走警告串流而不是一般輸出），
