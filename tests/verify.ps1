@@ -1710,6 +1710,147 @@ Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem，且與 -GenerateKeys �
     return ('沙箱 ~\.rune\public.pem 就緒，指紋 RUNE-KEY {0} 與印出值逐字相符；seal / open 皆直接對原檔執行，全程未製作任何腳本副本' -f $expect)
 }
 
+Invoke-TCase 'P7' '變異目錄與產品程式碼同步：每個 Old 恰好命中一次、對應的 New 尚未存在、每一項都真的改得動' -Tier Core {
+    <#
+        守的是「變異工具本身可用」。tests\mutate.ps1 自己只檢查 Old 是否 Contains
+        （≥1 次），命中兩次會讓一次 Replace 靜默改掉兩處，植入的缺陷就不是目錄上
+        寫的那一個，而報表照樣顯示 OK。這個檢查以前每輪靠人工腳本做、做完就刪——
+        是個每輪都依賴、卻沒有任何機制保證它會被執行的步驟。做成常設案例之後，
+        每次跑驗收都會驗一次，不必靠人記得。
+
+        三條斷言，逐項逐片段：
+
+        (1) Old 恰好命中一次，且**依 mutate.ps1 的實際行為逐對累進比對**。它做的是
+            foreach ($p in $t.Pairs) { $mut = $mut.Replace($p.Old, $p.New) }，
+            也就是第 2 對是對「已經套過第 1 對」的文字做替換。只拿原始文字數會漏掉
+            對間干擾——第 2 對的 Old 出現在第 1 對的 New 裡，原始文字上看是 1 次，
+            實際套用時卻不是。
+
+        (2) New 在**原始**文字中命中 0 次。這條刻意不用累進文字：M7 兩對的 New 是
+            同一個字串，第 2 對套用時第 1 對的 New 已經在了，拿累進文字數會假紅。
+            這條今天是靠每個 New 都帶 '# MUTATION <名>' 標記而自動成立；本案的作用
+            是把那個慣例從「大家都這樣寫」變成「寫錯就會紅」。
+
+        (3) 每一對的 Old 必須不等於 New，且整份檔案套完之後內容必須真的改變。
+            Old = New 的筆誤會讓變異變成空操作；空操作在 MustRed 非空的項目上會報
+            「斷言失效」還算看得出來，但在 **MustRed 刻意為空的 M1 上會報 OK**——
+            什麼都沒植入，卻宣稱「兩道檢查的涵蓋關係」這個否定性結論成立。
+
+        植入期間本案不適用：產品程式碼此時正處於被刻意改壞的狀態，Old 當然找不到。
+        以 mutate.ps1 自己的 RUNNING 標記偵測並 SKIP。對照組跑在 Set-RunLock 之前，
+        因此「未植入時目錄是自洽的」這件事仍然每輪都被驗到。
+    #>
+    $mutPath = Join-Path $script:RepoRoot 'tests\mutate.ps1'
+    Assert ([System.IO.File]::Exists($mutPath)) "找不到變異目錄檔案：$mutPath"
+
+    $lockFile = Join-Path $script:RepoRoot 'tests\_mutwork\RUNNING'
+    if ([System.IO.File]::Exists($lockFile)) {
+        Skip-Case '變異植入期間（tests\_mutwork\RUNNING 存在），產品程式碼正處於被植入狀態，本案不適用'
+    }
+
+    $mt = $null; $me = $null
+    $mutAst = [System.Management.Automation.Language.Parser]::ParseFile($mutPath, [ref]$mt, [ref]$me)
+    Assert ($me.Count -eq 0) ('mutate.ps1 解析錯誤 {0} 個：{1}' -f $me.Count, (Squash ($me[0].Message) 120))
+
+    $assign = @($mutAst.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Left.Extent.Text -eq '$script:Catalog'
+            }, $true))
+    Assert ($assign.Count -eq 1) ('mutate.ps1 裡的 $script:Catalog 指派不是恰好一處（{0} 處），本案讀不到變異目錄' -f $assign.Count)
+
+    # 只求值那一個 hashtable 字面，不 dot-source mutate.ps1 本體（那會真的跑起來）。
+    # 求值之前先確認右側確實是字面而非命令呼叫，免得「讀目錄」變成執行任意程式碼。
+    $rhs = $assign[0].Right
+    Assert ($rhs -is [System.Management.Automation.Language.CommandExpressionAst]) '$script:Catalog 的右側不是單一運算式，拒絕求值'
+    $expr = $rhs.Expression
+    if ($expr -is [System.Management.Automation.Language.ConvertExpressionAst]) { $expr = $expr.Child }
+    Assert ($expr -is [System.Management.Automation.Language.HashtableAst]) '$script:Catalog 的右側不是 hashtable 字面，拒絕求值'
+    $catalog = & ([scriptblock]::Create($rhs.Extent.Text))
+    Assert ($catalog.Keys.Count -gt 0) '變異目錄是空的'
+
+    # 未設定的欄位是 $null，而 @($null) 的長度是 1；一元逗號則是避免單元素陣列被
+    # 攤平成純量。兩個陷阱與 mutate.ps1 的 ConvertTo-List 同一組。
+    $asList = {
+        param($Value)
+        if ($null -eq $Value) { return , @() }
+        return , @($Value | Where-Object { $null -ne $_ })
+    }
+    $countOf = {
+        param([string]$Text, [string]$Needle)
+        $c = 0; $i = 0
+        while (($i = $Text.IndexOf($Needle, $i, [System.StringComparison]::Ordinal)) -ge 0) {
+            $c++; $i += $Needle.Length
+        }
+        return $c
+    }
+
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $totalOld = 0
+
+    foreach ($name in $catalog.Keys) {
+        $m = $catalog[$name]
+        $olds = & $asList $m.Old
+        $news = & $asList $m.New
+        $files = & $asList $m.File
+
+        if ($olds.Count -eq 0) { $problems.Add("$name：沒有宣告任何 Old"); continue }
+        if ($olds.Count -ne $news.Count) {
+            $problems.Add(('{0}：Old {1} 個、New {2} 個，數量不一致' -f $name, $olds.Count, $news.Count)); continue
+        }
+        if ($files.Count -eq 1) { $files = @($olds | ForEach-Object { $files[0] }) }
+        if ($files.Count -ne $olds.Count) {
+            $problems.Add(('{0}：File 既不是單一檔案，數量也對不上 Old/New（File {1} 個、Old {2} 個）' -f $name, $files.Count, $olds.Count)); continue
+        }
+
+        # 依檔案分組但保留對的原始順序：累進替換是以檔案為單位進行的。
+        $byFile = [ordered]@{}
+        for ($i = 0; $i -lt $olds.Count; $i++) {
+            $p = Join-Path $script:RepoRoot $files[$i]
+            if (-not $byFile.Contains($p)) { $byFile[$p] = [System.Collections.Generic.List[object]]::new() }
+            [void]$byFile[$p].Add([pscustomobject]@{ Old = [string]$olds[$i]; New = [string]$news[$i]; Idx = $i + 1 })
+        }
+
+        foreach ($path in @($byFile.Keys)) {
+            if (-not [System.IO.File]::Exists($path)) {
+                $problems.Add(('{0}：找不到目標檔案 {1}' -f $name, $path)); continue
+            }
+            $leaf = Split-Path -Leaf $path
+            $orig = [System.IO.File]::ReadAllText($path)
+            $cur = $orig
+            foreach ($pair in $byFile[$path]) {
+                $totalOld++
+                if ([string]::IsNullOrEmpty($pair.Old)) {
+                    $problems.Add(('{0} #{1}：Old 是空字串' -f $name, $pair.Idx)); continue
+                }
+                if ($pair.Old -ceq $pair.New) {
+                    $problems.Add(('{0} #{1}：Old 與 New 完全相同，這一對等於什麼都沒植入' -f $name, $pair.Idx)); continue
+                }
+                $hits = & $countOf $cur $pair.Old
+                if ($hits -ne 1) {
+                    $problems.Add(('{0} #{1}：Old 在 {2} 命中 {3} 次（必須恰好 1 次）：{4}' -f `
+                                $name, $pair.Idx, $leaf, $hits, (Squash $pair.Old 90)))
+                    continue
+                }
+                if (-not [string]::IsNullOrEmpty($pair.New)) {
+                    $pre = & $countOf $orig $pair.New
+                    if ($pre -ne 0) {
+                        $problems.Add(('{0} #{1}：New 在 {2} 的原始內容裡已經出現 {3} 次（必須 0 次，植入的內容要是真正的新內容）：{4}' -f `
+                                    $name, $pair.Idx, $leaf, $pre, (Squash $pair.New 90)))
+                    }
+                }
+                $cur = $cur.Replace($pair.Old, $pair.New)
+            }
+            if ($cur -ceq $orig) {
+                $problems.Add(('{0}：套完所有替換後 {1} 的內容完全沒變，這一項等於什麼都沒植入' -f $name, $leaf))
+            }
+        }
+    }
+
+    Assert ($problems.Count -eq 0) ("變異目錄與產品程式碼不同步（改文案或改程式時必須同步更新 mutate.ps1）：`n  " + ($problems -join "`n  "))
+    return ('{0} 項變異、{1} 個 Old 片段：逐對累進比對後每個都恰好命中一次，對應的 New 皆尚未存在，且每一項都確實改變了目標檔案' -f $catalog.Count, $totalOld)
+}
+
 Write-Host ''
 Write-Host '-- Roundtrip --' -ForegroundColor Cyan
 

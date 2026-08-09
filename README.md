@@ -307,7 +307,7 @@ pwsh -File .\tests\verify.ps1 -RepoRoot . -Tier Core   # 安全性子集，約�
 pwsh -File .\tests\verify.ps1 -RepoRoot . -Tier Full   # 全部
 ```
 
-對兩支入口腳本執行的黑箱驗收，共 92 案（Core 42 / Full-only 50）。案例只透過命令列
+對兩支入口腳本執行的黑箱驗收，共 93 案（Core 43 / Full-only 50）。案例只透過命令列
 呼叫受測物，不引用模組內部；金鑰派生與私鑰儲存格式另有依規格獨立實作的白盒驗證，
 規格參數解不出來就直接判定為實作與 `docs/DESIGN.md` 不符。所有會動到
 `` `~\.rune` `` 的案例都在沙箱家目錄下執行，且每次經由統一呼叫點啟動受測物之後都會
