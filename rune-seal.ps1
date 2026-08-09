@@ -27,6 +27,11 @@
     內容而非路徑）；多行 PEM 請用變數或 here-string 帶入，不要直接打在命令列上。
 #>
 [CmdletBinding()]
+# 本腳本是 CLI 入口，職責就是把模組回傳的結果印給使用者看。Write-Host 在這裡是
+# 正確的工具：訊息要無條件出現在畫面上，又不能混進任何回傳值。模組側一律回傳
+# 物件、不印字，這條規則只在這一層例外。
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+    Justification = 'CLI 入口腳本的呈現層：輸出是給人看的終端訊息，不是回傳值。')]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string] $Pack,
@@ -63,7 +68,17 @@ try {
     # 既然沒有可省的時間，就留著這個保證。
     Import-Module (Join-Path $PSScriptRoot 'RunePost') -Force
 
-    Invoke-RuneSeal -PackPath $Pack -OutFilePath $OutFile -PublicKeyRef $PublicKey -ForceOverwrite:$Force
+    # -InformationAction Continue：模組把「收件人公鑰指紋」與逐步進度寫到資訊
+    # 串流，預設是靜音的。指紋每次執行都要出現在畫面上（那是察覺 public.pem
+    # 被掉包的唯一機會），進度也要邊做邊出現而不是事後補印，所以在這裡打開。
+    $result = Invoke-RuneSeal -PackPath $Pack -OutFilePath $OutFile -PublicKeyRef $PublicKey `
+        -ForceOverwrite:$Force -InformationAction Continue
+
+    Write-Host ''
+    Write-Host "完成：$($result.OutFile)"
+    Write-Host ('原始（打包後、壓縮前）: {0:N0} bytes' -f $result.OriginalSize)
+    Write-Host ('壓縮後（Brotli）       : {0:N0} bytes' -f $result.CompressedSize)
+    Write-Host ('Base64 後（輸出檔）    : {0:N0} bytes' -f $result.Base64Size)
 }
 catch {
     # 用 [Console]::Error.WriteLine 直接印一行錯誤訊息，不用 Write-Error——

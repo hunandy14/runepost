@@ -174,6 +174,10 @@ $script:WrapperSource = @'
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 try { $OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 $ErrorActionPreference = 'Continue'
+# 呼叫端 session 的 $ConfirmPreference 也是入口腳本必須面對的環境——自動化用的
+# profile 常把它設成 None。CTXT_CONFIRM_PREFERENCE 讓案例能重現這個情境；未設定時
+# 維持 pwsh 的預設值 High。
+if ($env:CTXT_CONFIRM_PREFERENCE) { $ConfirmPreference = $env:CTXT_CONFIRM_PREFERENCE }
 $target = $env:CTXT_TARGET
 $global:LASTEXITCODE = 0
 try {
@@ -880,6 +884,42 @@ function Get-PemBlock {
     return $null
 }
 
+# 模組相依圖：函式名 -> 它在自己的內文裡呼叫到的「模組內」函式名。純 AST，不執行
+# 任何模組程式碼。C63 / C64 用它斷言加密端與解密端的相依方向沒有互相汙染。
+function Get-RuneCallGraph {
+    $calls = @{}
+    foreach ($f in Get-ChildItem -LiteralPath $script:ModuleRoot -Recurse -Filter '*.ps1' -File) {
+        $t = $null; $e = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+        Assert ($e.Count -eq 0) ("模組檔案解析失敗：$($f.Name) => " + (Squash $e[0].Message 120))
+        foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+            $calls[$fn.Name] = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                    ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+        }
+    }
+    # 只留「模組內函式 -> 模組內函式」的邊；外部 cmdlet（Get-ChildItem、Join-Path…）不算
+    $graph = @{}
+    foreach ($name in @($calls.Keys)) {
+        $graph[$name] = @($calls[$name] | Where-Object { $calls.ContainsKey($_) } | Sort-Object -Unique)
+    }
+    return $graph
+}
+
+# 由 $Root 出發的遞移呼叫閉包（不含 $Root 自己）。遞迴函式靠 HashSet 收斂。
+function Get-RuneCallClosure {
+    param([hashtable]$Graph, [string]$Root)
+    Assert ($Graph.ContainsKey($Root)) "相依圖裡沒有這個函式：$Root"
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    $queue.Enqueue($Root)
+    while ($queue.Count -gt 0) {
+        foreach ($callee in $Graph[$queue.Dequeue()]) {
+            if ($seen.Add($callee)) { $queue.Enqueue($callee) }
+        }
+    }
+    return @($seen | Sort-Object)
+}
+
 # 探針輸出的 KEY=VALUE 行 -> hashtable
 function ConvertFrom-ProbeOutput {
     param([string]$Text)
@@ -1206,7 +1246,7 @@ Register-Fixture 'KeyPass' {
     $body = @'
 Import-Module $env:RUNE_MODULE -Force
 $pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
-Invoke-RuneGenerateKeys -Protect Passphrase -Passphrase $pw
+New-RuneKeyPair -Protect Passphrase -Passphrase $pw
 'HOMEOK=' + ($HOME -eq $env:USERPROFILE)
 'KEYHEAD=' + (Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.rune\private.key') -TotalCount 1)
 Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef (Join-Path $env:USERPROFILE '.rune\public.pem')
@@ -1312,7 +1352,7 @@ Register-Fixture 'ExportedEncKey' {
     $body = @'
 Import-Module $env:RUNE_MODULE -Force
 $pw = ConvertTo-SecureString $env:RUNE_PW -AsPlainText -Force
-Invoke-RuneExportPrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force
+Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Protect Passphrase -OutPassphrase $pw -Force -Confirm:$false
 'HEAD=' + (Get-Content -LiteralPath $env:RUNE_OUTKEY -TotalCount 1)
 try {
     Invoke-RuneOpen -InFilePath $env:RUNE_CT -DestinationPath $env:RUNE_DESTBAD -KeyFilePath $env:RUNE_OUTKEY
@@ -2242,20 +2282,77 @@ Invoke-TCase 'C62' '-PublicKey 收到格式錯誤的 PEM 字串 → 報公鑰格
     return (Expect-SealRefused -Res $r -OutFile $out -What '-PublicKey 收到格式錯誤的 PEM 字串' -Expect @('pubkey.badpem'))
 }
 
-# 負面符號掃描（加密端不含解密端專屬符號，反之亦然）建立在「單檔部署、seal 與
-# open 是兩份互不重疊的產物」之上。模組架構下加密端是複製整個 RunePost\，解密端
-# 的程式碼本來就會一起過去，這個屬性不成立：只掃兩支薄入口腳本會變成必然通過，
-# 掃模組則必然失敗。兩案因此以 INFO 記錄事實，而不是靜悄悄刪掉讓它從報表消失。
-# 若「最小部署」仍是目標，可改成斷言 Public\Invoke-RuneSeal.ps1 的相依閉包不含
-# 任何私鑰／解包函式——那守的是相依方向而非檔案內容，在模組架構下才成立。
+# 相依方向：加密端與解密端在同一個模組裡共存，但呼叫關係不得互相汙染。
+#
+# seal 這條路徑只需要收件人公鑰，永遠不該碰到私鑰、密碼或解封裝；open 這條路徑只
+# 需要自己的私鑰，永遠不該碰到打包、壓縮與加密。相依閉包比「檔案裡不出現某個字串」
+# 更本質：它守的是呼叫關係而不是檔案內容，改名、搬檔、加註解都不會讓它失準，而且
+# 在「加密端複製整個 RunePost\」的部署方式下依然成立。
+#
+# 兩案都先確認名單上的每個名字真的存在於模組中——漏掉這一步，任何一次改名都會讓
+# 斷言靜悄悄退化成恆真；也都先確認閉包本身含有該端該有的函式，否則「零交集」有可能
+# 只是因為閉包算出來是空的。
+#
+# 涵蓋範圍：靜態字面呼叫，以及沿著這些呼叫展開的遞移相依（中間隔幾層都抓得到）。
+# 不在涵蓋範圍內的是動態呼叫——透過變數的 & $cmd、Invoke-Expression、以及別名，
+# 三者都繞得過。這是 CommandAst.GetCommandName() 只認得靜態字面名稱的本質限制。
+# 本專案的模組程式碼一律直接具名呼叫，這個限制目前不構成缺口；若日後引入動態派發，
+# 這兩案的結論就不再涵蓋那條路徑。
 
-Invoke-TCase 'C63' '負面符號掃描：加密端不含解密端專屬符號（模組架構下不成立）' -Tier Full {
-    Info-Case ('加密端是複製整個 RunePost\ 資料夾，模組同時含 seal 與 open 兩側程式碼，' +
-        '「加密端不含解密程式碼」不成立；只掃薄入口腳本則形同必然通過。以 INFO 記錄。')
+$script:DecryptOnlyFunctions = @(
+    # 私鑰與密碼
+    'Get-RunePrivateKey'
+    'Get-RunePrivateKeyFormat'
+    'Get-RuneSharedSecretForDecrypt'
+    'Read-RunePassphrase'
+    'ConvertFrom-RuneSecureString'
+    # 解封裝
+    'ConvertFrom-RuneContainer'
+    'Expand-RuneBrotli'
+    'Expand-RuneZip'
+    'Move-RuneExtractedTree'
+)
+
+$script:EncryptOnlyFunctions = @(
+    # 收件人公鑰
+    'Get-RunePublicKey'
+    'Get-RuneMissingPublicKeyMessage'
+    # 打包、壓縮、加密、組容器
+    'Get-RunePackPlan'
+    'New-RuneZipBytes'
+    'Compress-RuneBrotli'
+    'Protect-RuneAesGcm'
+    'New-RuneContainer'
+)
+
+Invoke-TCase 'C63' '相依閉包：Invoke-RuneSeal 不觸及私鑰／解密專屬函式' -Tier Core {
+    $graph = Get-RuneCallGraph
+    $gone = @($script:DecryptOnlyFunctions | Where-Object { -not $graph.ContainsKey($_) })
+    Assert ($gone.Count -eq 0) ('解密端名單裡的函式已不在模組中（改名未同步，斷言會退化成恆真）：' + ($gone -join ','))
+
+    $closure = Get-RuneCallClosure -Graph $graph -Root 'Invoke-RuneSeal'
+    $absent = @($script:EncryptOnlyFunctions | Where-Object { $closure -notcontains $_ })
+    Assert ($absent.Count -eq 0) ('Invoke-RuneSeal 的閉包少了加密端本來就該有的函式，閉包計算有問題：' + ($absent -join ','))
+
+    $hit = @($closure | Where-Object { $script:DecryptOnlyFunctions -contains $_ })
+    Assert ($hit.Count -eq 0) ('Invoke-RuneSeal 的相依閉包觸及了解密／私鑰專屬函式：' + ($hit -join ','))
+    return ('遞移呼叫 {0} 個模組函式，涵蓋加密端 {1} 個必要函式，與 {2} 個解密／私鑰專屬函式零交集：{3}' -f `
+            $closure.Count, $script:EncryptOnlyFunctions.Count, $script:DecryptOnlyFunctions.Count, ($closure -join ','))
 }
 
-Invoke-TCase 'C64' '負面符號掃描：解密端不含加密端專屬符號（模組架構下不成立）' -Tier Full {
-    Info-Case '同 C63：此斷言的前提（兩份互不重疊的單檔產物）不存在。以 INFO 記錄。'
+Invoke-TCase 'C64' '相依閉包：Invoke-RuneOpen 不觸及公鑰／打包加密專屬函式' -Tier Core {
+    $graph = Get-RuneCallGraph
+    $gone = @($script:EncryptOnlyFunctions | Where-Object { -not $graph.ContainsKey($_) })
+    Assert ($gone.Count -eq 0) ('加密端名單裡的函式已不在模組中（改名未同步，斷言會退化成恆真）：' + ($gone -join ','))
+
+    $closure = Get-RuneCallClosure -Graph $graph -Root 'Invoke-RuneOpen'
+    $absent = @($script:DecryptOnlyFunctions | Where-Object { $closure -notcontains $_ })
+    Assert ($absent.Count -eq 0) ('Invoke-RuneOpen 的閉包少了解密端本來就該有的函式，閉包計算有問題：' + ($absent -join ','))
+
+    $hit = @($closure | Where-Object { $script:EncryptOnlyFunctions -contains $_ })
+    Assert ($hit.Count -eq 0) ('Invoke-RuneOpen 的相依閉包觸及了公鑰／打包加密專屬函式：' + ($hit -join ','))
+    return ('遞移呼叫 {0} 個模組函式，涵蓋解密端 {1} 個必要函式，與 {2} 個公鑰／加密專屬函式零交集：{3}' -f `
+            $closure.Count, $script:DecryptOnlyFunctions.Count, $script:EncryptOnlyFunctions.Count, ($closure -join ','))
 }
 
 
@@ -2462,8 +2559,10 @@ Invoke-TCase 'C67' '以模組身分直接呼叫 Invoke-RuneSeal / Invoke-RuneOpe
     [System.IO.File]::WriteAllText($probe, @'
 Import-Module $env:RUNE_MODULE -Force
 "CALLER-EAP=$ErrorActionPreference"
-Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef $env:RUNE_PUB
-Invoke-RuneOpen -InFilePath $env:RUNE_OUT -DestinationPath $env:RUNE_DEST -KeyFilePath $env:RUNE_KEY
+$sealed = Invoke-RuneSeal -PackPath $env:RUNE_SRC -OutFilePath $env:RUNE_OUT -PublicKeyRef $env:RUNE_PUB
+'SEALFP=' + $sealed.RecipientFingerprint
+$opened = Invoke-RuneOpen -InFilePath $env:RUNE_OUT -DestinationPath $env:RUNE_DEST -KeyFilePath $env:RUNE_KEY
+'OPENCOUNT=' + $opened.FileCount
 'DONE'
 '@, $script:Utf8Bom)
 
@@ -2485,7 +2584,18 @@ Invoke-RuneOpen -InFilePath $env:RUNE_OUT -DestinationPath $env:RUNE_DEST -KeyFi
     Assert ($c.Magic -eq 'RUNE' -and $c.Version -eq 2 -and $c.ContentType -eq 1) '產物不是合法的 RUNE v2 容器'
     $cmp = Compare-Tree -Expected (Get-TreeMap $src) -Actual (Get-TreeMap $dest) -AllowRootPrefix 'tree'
     Assert ($null -eq $cmp.Diff) $cmp.Diff
-    return ('未經入口腳本、呼叫端偏好為預設（EAP=Continue、StrictMode 關）：{0} 檔位元一致還原；{1}' -f `
+
+    # 回傳物件是模組直呼者唯一的資訊來源：畫面上的指紋走資訊串流，預設是靜音的，
+    # 不經入口腳本就看不到。這兩個欄位沒人斷言就會靜靜地爛掉。
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['SEALFP'] -match '^[0-9A-F]{4}(-[0-9A-F]{4}){7}$') `
+    ('Invoke-RuneSeal 的 RecipientFingerprint 不是指紋格式：' + $kv['SEALFP'])
+    Assert ($kv['SEALFP'] -eq (Get-Fingerprint -Text $k.Result.All)) `
+    ('回傳的 RecipientFingerprint 與 -GenerateKeys 印出的不一致：{0} vs {1}' -f $kv['SEALFP'], (Get-Fingerprint -Text $k.Result.All))
+    Assert ($kv['OPENCOUNT'] -eq [string](Get-TreeMap $src).Count) `
+    ('Invoke-RuneOpen 的 FileCount 與實際還原檔數不符：回傳 {0}，實際 {1}' -f $kv['OPENCOUNT'], (Get-TreeMap $src).Count)
+
+    return ('未經入口腳本、呼叫端偏好為預設（EAP=Continue、StrictMode 關）：{0} 檔位元一致還原；回傳物件的 RecipientFingerprint 與 FileCount 皆對得上；{1}' -f `
         (Get-TreeMap $src).Count, $cmp.Convention)
 }
 
@@ -2849,6 +2959,150 @@ Invoke-TCase 'C82' '-ExportPrivateKey 原子寫入：正常路徑不留 .tmp-* �
     $ind.ImportFromPem($text)
     Assert ([Convert]::ToHexString($ind.ExportSubjectPublicKeyInfo()) -eq [Convert]::ToHexString($k.PubSpki)) '匯出檔內容不是金鑰 A'
     return ('連續匯出 2 次（含 -Force 覆蓋），資料夾只剩 1 個完整可載入的 PEM，無 .tmp-* 殘留')
+}
+
+# 兩個破壞性動作（產生金鑰會改名既有金鑰、匯出私鑰會多一份私鑰落地）改用
+# SupportsShouldProcess 之後，-WhatIf / -Confirm / -Force 三者的界線要各自釘死。
+# 這三案一律以模組身分執行：-WhatIf 與 -Confirm 是 common parameters，入口腳本沒有
+# 宣告 SupportsShouldProcess，命令列上沒有這兩個開關。
+
+Invoke-TCase 'C84' 'ShouldProcess：-WhatIf 完全不寫入（產生金鑰／匯出私鑰兩條路徑）' -Tier Core -Needs @('KeyA') {
+    # -WhatIf 的價值全在「真的什麼都沒做」。用全新的空沙箱跑兩條破壞性路徑，事後
+    # 要求沙箱與匯出目標都一個檔案也沒有，而且函式沒有回傳結果物件——回傳了就代表
+    # 動作真的執行過。
+    $sb = New-HomeSandbox -Name 'whatif'
+    $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'whatif.pem'
+    if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+
+    $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$g = New-RuneKeyPair -WhatIf
+'GEN_RETURNED=' + [bool]$g
+$e = Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -WhatIf
+'EXP_RETURNED=' + [bool]$e
+'DONE=1'
+'@
+    $r = Invoke-RuneProbe -Name 'whatif' -Body $body -EnvVars ($sb.Env + @{
+            RUNE_OUTKEY = $outKey; RUNE_SRCKEY = (Get-Fixture 'KeyA').KeyPath
+        }) -Timeout 60
+    Assert (-not $r.TimedOut) '-WhatIf 竟停在互動提示（子行程逾時）'
+    Assert (-not $r.Failed) ('-WhatIf 不該失敗：' + (Squash $r.All 200))
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['DONE'] -eq '1') '探針未跑完'
+    Assert ($kv['GEN_RETURNED'] -eq 'False') 'New-RuneKeyPair -WhatIf 竟回傳了結果物件（動作真的做了）'
+    Assert ($kv['EXP_RETURNED'] -eq 'False') 'Export-RunePrivateKey -WhatIf 竟回傳了結果物件（動作真的做了）'
+    Assert (-not [System.IO.File]::Exists($sb.KeyPath)) "-WhatIf 竟產生了私鑰：$($sb.KeyPath)"
+    Assert (-not [System.IO.File]::Exists($sb.PubPath)) "-WhatIf 竟產生了公鑰：$($sb.PubPath)"
+    Assert (-not [System.IO.File]::Exists($outKey)) "-WhatIf 竟產生了匯出檔：$outKey"
+    Assert (-not [System.IO.Directory]::Exists((Join-Path $sb.Path '.rune'))) '-WhatIf 竟建立了 .rune 資料夾'
+    $whatIfLines = @(($r.StdOut -split "`r?`n") | Where-Object { $_ -match 'What if|如果' }).Count
+    Assert ($whatIfLines -ge 2) ('兩條路徑應各印一行 What if 說明，實得 {0} 行：{1}' -f $whatIfLines, (Squash $r.StdOut 200))
+    return ('兩條破壞性路徑帶 -WhatIf：皆未回傳結果物件、沙箱沒有 .rune、沒有匯出檔，並各印出一行預演說明')
+}
+
+Invoke-TCase 'C85' 'ShouldProcess：-Confirm:$false 可在非互動環境略過確認完成匯出' -Tier Full -Needs @('KeyA') {
+    $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'confirmfalse.pem'
+    if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+
+    $body = @'
+Import-Module $env:RUNE_MODULE -Force
+$r = Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_SRCKEY -Confirm:$false
+'OUT=' + $r.OutFile
+'FP=' + $r.Fingerprint
+'DONE=1'
+'@
+    $r = Invoke-RuneProbe -Name 'confirmfalse' -Body $body -EnvVars ((Get-Fixture 'KeyA').Sandbox.Env + @{
+            RUNE_OUTKEY = $outKey; RUNE_SRCKEY = (Get-Fixture 'KeyA').KeyPath
+        }) -Timeout 60
+    Assert (-not $r.TimedOut) '子行程逾時（-Confirm:$false 竟仍停在確認提示）'
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['DONE'] -eq '1') ('探針未跑完：' + (Squash $r.All 200))
+    Assert ([System.IO.File]::Exists($outKey)) '-Confirm:$false 未產生匯出檔'
+    $text = [System.IO.File]::ReadAllText($outKey)
+    Assert ($text -match '-----BEGIN PRIVATE KEY-----') ('匯出檔不是 PKCS#8 PEM：' + (Squash $text 60))
+    Assert ($kv['OUT'] -eq $outKey) ('回傳物件的 OutFile 與實際輸出不符：' + $kv['OUT'])
+    return ('非互動環境下只靠 -Confirm:$false（未帶 -Force）即完成匯出，指紋 RUNE-KEY ' + $kv['FP'])
+}
+
+Invoke-TCase 'C86' 'ShouldProcess：-Force 只管覆蓋，不代表略過確認' -Tier Full -Needs @('KeyA') {
+    # 兩件事各自獨立，所以兩個方向都要試：
+    #   (a) 只給 -Force → 確認提示照樣需要，非互動環境必須被擋下、不得產生檔案。
+    #   (b) 只給 -Confirm:$false → 確認略過了，但既有的 -OutFile 仍不得被覆蓋。
+    $dir = Clear-Dir (Join-Path $script:Work 'keybackup_orthogonal')
+    $forceOnly = Join-Path $dir 'forceonly.pem'
+    $existing = Join-Path $dir 'existing.pem'
+    [System.IO.File]::WriteAllText($existing, 'NOT A KEY', $script:Utf8NoBom)
+    $before = Get-Sha $existing
+
+    $body = @'
+Import-Module $env:RUNE_MODULE -Force
+try {
+    Export-RunePrivateKey -OutFilePath $env:RUNE_FORCEONLY -KeyFilePath $env:RUNE_SRCKEY -Force
+    'A=NO-THROW'
+}
+catch { 'A=THROWN'; 'AMSG=' + ($_.Exception.Message -replace '\s+', ' ') }
+try {
+    Export-RunePrivateKey -OutFilePath $env:RUNE_EXISTING -KeyFilePath $env:RUNE_SRCKEY -Confirm:$false
+    'B=NO-THROW'
+}
+catch { 'B=THROWN'; 'BMSG=' + ($_.Exception.Message -replace '\s+', ' ') }
+'DONE=1'
+'@
+    $r = Invoke-RuneProbe -Name 'forceorthogonal' -Body $body -EnvVars ((Get-Fixture 'KeyA').Sandbox.Env + @{
+            RUNE_FORCEONLY = $forceOnly; RUNE_EXISTING = $existing; RUNE_SRCKEY = (Get-Fixture 'KeyA').KeyPath
+        }) -Timeout 60
+    Assert (-not $r.TimedOut) '子行程逾時（可能卡在確認提示）'
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['DONE'] -eq '1') ('探針未跑完：' + (Squash $r.All 200))
+
+    Assert ($kv['A'] -eq 'THROWN') '只給 -Force 竟略過了確認提示（-Force 不該身兼兩職）'
+    Assert-Msg -Text $kv['AMSG'] -Keys @('noninteractive') -What '只給 -Force 的訊息'
+    Assert (-not [System.IO.File]::Exists($forceOnly)) "只給 -Force 卻仍產生了匯出檔：$forceOnly"
+
+    Assert ($kv['B'] -eq 'THROWN') '只給 -Confirm:$false 竟覆蓋了既有的 -OutFile'
+    Assert-Msg -Text $kv['BMSG'] -Keys @('stage.exists', 'hint.force') -What '只給 -Confirm:$false 的訊息'
+    Assert ((Get-Sha $existing) -eq $before) '既有的輸出檔被改動了'
+    return ('-Force 不略過確認（被非互動防呆擋下、無檔案產出）；-Confirm:$false 不允許覆蓋（既有檔 SHA 未變）；兩者確實各司其職')
+}
+
+Invoke-TCase 'C87' '呼叫端 $ConfirmPreference = None 不得讓入口腳本的確認被跳過' -Tier Core {
+    <#
+        ShouldProcess 讀的是 $ConfirmPreference，而那是會從呼叫端 session 繼承下來的
+        偏好——自動化用的 profile 常把它設成 None。入口腳本因此必須在不帶 -Force 時
+        明確送出 -Confirm，不能只靠 ConfirmImpact：一旦繼承到 None，確認提示與疊在
+        它外面的非互動防呆會一起失效，變成「已有金鑰、沒帶 -Force，卻靜默輪替金鑰
+        並 exit 0」。金鑰輪替不可逆，這是資料風險而不只是介面瑕疵。
+
+        這一案守的是入口腳本的參數轉發，不是模組函式本身，所以走 CLI 而不是探針；
+        兩條破壞性路徑各驗一次。
+    #>
+    $k = New-TestKeyPair -Name 'confpref'
+    Assert ($k.HasKey) '前置：confpref 沙箱未產生第一把私鑰'
+    Assert ([System.IO.File]::Exists($k.Sandbox.PubPath)) '前置：confpref 沙箱未寫出 public.pem'
+
+    # 沙箱環境再疊上「呼叫端把 $ConfirmPreference 設成 None」這個條件
+    $envNone = $k.Sandbox.Env + @{ CTXT_CONFIRM_PREFERENCE = 'None' }
+    $runeDir = Join-Path $k.Sandbox.Path '.rune'
+    $keySha = Get-Sha $k.KeyPath
+    $pubSha = Get-Sha $k.Sandbox.PubPath
+    $bakBefore = @([System.IO.Directory]::EnumerateFiles($runeDir, '*.bak-*')).Count
+
+    # (a) -GenerateKeys：私鑰已存在且未帶 -Force → 必須被拒絕，金鑰一個位元都不能動
+    $ra = Invoke-Open -GenerateKeys -Env $envNone -Cwd $k.Sandbox.Path -Timeout 45
+    $evA = Expect-OpenRefused -Res $ra -Category 'exists' -What '呼叫端 ConfirmPreference=None 的 -GenerateKeys' `
+        -Unchanged @{ $k.KeyPath = $keySha; $k.Sandbox.PubPath = $pubSha } -Expect @('hint.force')
+    # 備份檔一旦出現就代表輪替真的發生過，比雜湊比對更早暴露問題
+    $bakAfter = @([System.IO.Directory]::EnumerateFiles($runeDir, '*.bak-*')).Count
+    Assert ($bakAfter -eq $bakBefore) ('金鑰被靜默輪替了：備份檔 {0} → {1}' -f $bakBefore, $bakAfter)
+
+    # (b) -ExportPrivateKey：未帶 -Force → 必須被拒絕，且不得產生匯出檔
+    $outKey = Join-Path (New-Dir (Join-Path $script:Work 'keybackup')) 'confpref.pem'
+    if ([System.IO.File]::Exists($outKey)) { [System.IO.File]::Delete($outKey) }
+    $rb = Invoke-Open -ExportPrivateKey -OutFile $outKey -KeyFile $k.KeyPath -Env $envNone -Timeout 45
+    [void](Expect-OpenRefused -Res $rb -NoFile @($outKey) -Category 'key' `
+            -What '呼叫端 ConfirmPreference=None 的 -ExportPrivateKey' -Expect @('noninteractive', 'hint.force'))
+
+    return ($evA + '；兩條破壞性路徑在呼叫端 ConfirmPreference=None 下仍被拒絕：私鑰／公鑰 SHA 未變、無備份檔、無匯出檔')
 }
 
 Invoke-TCase 'C83' '空的私鑰檔：直接報「空檔案」，不繞成 DPAPI 解保護失敗' -Tier Full -Needs @('CtWild', 'KeyA') {

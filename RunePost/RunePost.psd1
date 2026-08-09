@@ -11,9 +11,9 @@
     FunctionsToExport = @(
         'Invoke-RuneSeal'
         'Invoke-RuneOpen'
-        'Invoke-RuneGenerateKeys'
-        'Invoke-RuneExportPublicKey'
-        'Invoke-RuneExportPrivateKey'
+        'New-RuneKeyPair'
+        'Export-RunePublicKey'
+        'Export-RunePrivateKey'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

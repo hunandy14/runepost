@@ -1,4 +1,4 @@
-﻿function Invoke-RuneExportPublicKey {
+﻿function Export-RunePublicKey {
     <#
         從既有私鑰重新導出公鑰。
 
@@ -14,7 +14,13 @@
             不去動預設的 public.pem。理由：這裡的「覆寫無風險」只對「這把私鑰
             對應的公鑰檔」成立；拿一把備用／次要私鑰導出，若仍寫回預設路徑，
             會靜默覆蓋主金鑰的 public.pem，讓加密端此後預設加密給錯的收件人。
+
+        回傳 Rune.PublicKeyExport 物件，呈現由呼叫端負責。IsDefaultKey 為 $false
+        時代表走的是「寫到來源私鑰同目錄」那條路，呼叫端應一併告知使用者預設的
+        public.pem 沒有被動到。
     #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [string] $KeyFilePath,
         # 私鑰為密碼保護的 PKCS#8 PEM 時所需；未提供則於互動環境詢問。
@@ -47,9 +53,12 @@
     }
     [System.IO.File]::WriteAllText($outFile, $publicPem, [System.Text.UTF8Encoding]::new($false))
 
-    if (-not $isDefaultKey) {
-        Write-Host "使用了非預設私鑰：$effectiveKeyPath"
-        Write-Host "公鑰已寫到同目錄，未動到預設的 $($Script:DefaultPublicKeyFile)。"
+    return [pscustomobject]@{
+        PSTypeName           = 'Rune.PublicKeyExport'
+        KeyFile              = $effectiveKeyPath
+        PublicKeyFile        = $outFile
+        Fingerprint          = (Get-RuneKeyFingerprint -SpkiDer $spkiDer)
+        IsDefaultKey         = $isDefaultKey
+        DefaultPublicKeyFile = $Script:DefaultPublicKeyFile
     }
-    Write-RuneKeySummary -Title '已重新導出公鑰' -KeyFilePath $effectiveKeyPath -PublicKeyFilePath $outFile -SpkiDer $spkiDer
 }

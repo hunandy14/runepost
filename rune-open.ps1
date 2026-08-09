@@ -107,6 +107,11 @@
     非互動環境請以 -Passphrase 傳入。
 #>
 [CmdletBinding(DefaultParameterSetName = 'Unpack')]
+# 本腳本是 CLI 入口，職責就是把模組回傳的結果印給使用者看。Write-Host 在這裡是
+# 正確的工具：訊息要無條件出現在畫面上，又不能混進任何回傳值。模組側一律回傳
+# 物件、不印字，這條規則只在這一層例外。
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+    Justification = 'CLI 入口腳本的呈現層：輸出是給人看的終端訊息，不是回傳值。')]
 param(
     [Parameter(ParameterSetName = 'Unpack', Mandatory = $true, Position = 0)]
     [string] $Unpack,
@@ -156,6 +161,43 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ==========================================================================
+# 呈現層
+#
+# 金鑰摘要的版面（標題 + 私鑰／公鑰路徑 + 指紋，有備份時加第四行）由這裡決定；
+# 模組只回傳欄位。刻意不印 PEM 全文——路徑已經給了，要看內容用 Get-Content。
+# ==========================================================================
+
+function Show-RuneKeySummary {
+    param(
+        [string] $Title,
+        [string] $KeyFilePath,
+        [string] $KeyFileNote,
+        [string] $PublicKeyFilePath,
+        [string] $Fingerprint,
+        [string] $BackupKeyFilePath
+    )
+    Write-Host $Title
+    $keyLine = "  私鑰  $KeyFilePath"
+    if ($KeyFileNote) { $keyLine += "   ($KeyFileNote)" }
+    Write-Host $keyLine
+    Write-Host "  公鑰  $PublicKeyFilePath"
+    Write-Host ('  指紋  RUNE-KEY {0}' -f $Fingerprint)
+    if ($BackupKeyFilePath) {
+        Write-Host "  備份  $BackupKeyFilePath"
+    }
+}
+
+# 私鑰的保護方式／匯出格式一律放在成功輸出的第一行，且走一般輸出串流：警告串流
+# 在輸出被重新導向時可能被丟棄，使用者不該因此不知道自己手上這把私鑰是不是明文。
+# 同一個理由也決定了警告的位置——模組的 Write-Warning 由呼叫端收進
+# -WarningVariable，等摘要印完才重播，好讓第一行永遠是保護方式而不是警告。
+function Show-RuneDeferredWarning {
+    param([System.Collections.IEnumerable] $Warnings)
+    if ($null -eq $Warnings) { return }
+    foreach ($w in $Warnings) { Write-Warning ([string]$w) }
+}
+
+# ==========================================================================
 # 進入點
 # ==========================================================================
 
@@ -169,17 +211,57 @@ try {
 
     switch ($PSCmdlet.ParameterSetName) {
         'GenerateKeys' {
-            Invoke-RuneGenerateKeys -Protect $Protect -Passphrase $Passphrase -Force:$Force
+            # 這裡不綁 -Confirm：明確綁定的 -Confirm 會蓋過函式內部的判斷，而「金鑰
+            # 存不存在、有沒有東西值得問」只有模組答得出來。確認不被呼叫端 session
+            # 的 $ConfirmPreference 跳過，由 New-RuneKeyPair 自己保證。
+            $result = New-RuneKeyPair -Protect $Protect -Passphrase $Passphrase -Force:$Force `
+                -WarningVariable keyWarnings -WarningAction SilentlyContinue
+            if ($result) {
+                Show-RuneKeySummary -Title "已產生 ECDH P-256 金鑰對（私鑰保護方式：$($result.ProtectNote)）" `
+                    -KeyFilePath $result.KeyFile -KeyFileNote $result.ProtectNote `
+                    -PublicKeyFilePath $result.PublicKeyFile -Fingerprint $result.Fingerprint `
+                    -BackupKeyFilePath $result.BackupKeyFile
+            }
+            else {
+                Write-Host '已取消，未變更任何檔案。'
+            }
+            Show-RuneDeferredWarning -Warnings $keyWarnings
         }
         'ExportPublicKey' {
-            Invoke-RuneExportPublicKey -KeyFilePath $KeyFile -Passphrase $Passphrase
+            $result = Export-RunePublicKey -KeyFilePath $KeyFile -Passphrase $Passphrase
+            if (-not $result.IsDefaultKey) {
+                Write-Host "使用了非預設私鑰：$($result.KeyFile)"
+                Write-Host "公鑰已寫到同目錄，未動到預設的 $($result.DefaultPublicKeyFile)。"
+            }
+            Show-RuneKeySummary -Title '已重新導出公鑰' -KeyFilePath $result.KeyFile `
+                -PublicKeyFilePath $result.PublicKeyFile -Fingerprint $result.Fingerprint
         }
         'ExportPrivateKey' {
-            Invoke-RuneExportPrivateKey -OutFilePath $OutFile -KeyFilePath $KeyFile -Protect $Protect `
-                -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force
+            # CLI 的 -Force 一次表達兩件事：略過確認、允許覆蓋既有的 -OutFile。模組
+            # 函式把這兩件事分開，所以在這一層把「略過確認」翻成 -Confirm:$false，
+            # 而且只在帶 -Force 時才綁定：明確綁定的 -Confirm 會蓋過函式內部的判斷，
+            # 不帶 -Force 時交給 Export-RunePrivateKey 自己決定（它一律要求確認）。
+            $confirmArg = @{}
+            if ($Force) { $confirmArg['Confirm'] = $false }
+            $result = Export-RunePrivateKey -OutFilePath $OutFile -KeyFilePath $KeyFile -Protect $Protect `
+                -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force @confirmArg `
+                -WarningVariable keyWarnings -WarningAction SilentlyContinue
+            if ($result) {
+                Write-Host "已匯出私鑰（格式：$($result.ProtectNote)）"
+                Write-Host "  來源  $($result.SourceKeyFile)"
+                Write-Host "  輸出  $($result.OutFile)"
+                Write-Host ('  指紋  RUNE-KEY {0}' -f $result.Fingerprint)
+                Write-Host "還原方式：rune-open.ps1 -Unpack <密文檔> -Destination <目的資料夾> -KeyFile $($result.OutFile)"
+            }
+            else {
+                Write-Host '已取消，未變更任何檔案。'
+            }
+            Show-RuneDeferredWarning -Warnings $keyWarnings
         }
         'Unpack' {
-            Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination -KeyFilePath $KeyFile -Passphrase $Passphrase
+            $result = Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination `
+                -KeyFilePath $KeyFile -Passphrase $Passphrase
+            Write-Host "解密完成，檔案已還原至：$($result.Destination)"
         }
     }
 }

@@ -1,8 +1,18 @@
-﻿# ==========================================================================
+# ==========================================================================
 # 區塊：-Pack 主流程
 # ==========================================================================
 
 function Invoke-RuneSeal {
+    <#
+        打包（ZIP/store）→ 壓縮（Brotli）→ 加密（ECDH P-256 + HKDF-SHA256 +
+        AES-256-GCM）→ Base64 落地，回傳 Rune.SealResult 物件。
+
+        本函式不負責呈現。逐步進度與收件人公鑰指紋走資訊串流（Write-Information），
+        呼叫端要顯示就帶 -InformationAction Continue；最終結果一律以物件回傳，
+        由呼叫端決定印成什麼樣子。
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [string] $PackPath,
         [string] $OutFilePath,
@@ -10,13 +20,14 @@ function Invoke-RuneSeal {
         [switch] $ForceOverwrite
     )
 
-    # 公鑰在最前面就載入並印出指紋：三種失敗（找不到公鑰檔、PEM 格式無效、曲線非
-    # P-256）都必須在產生任何輸出檔之前結束；指紋每次執行都印，讓使用者每次都有
+    # 公鑰在最前面就載入並報出指紋：三種失敗（找不到公鑰檔、PEM 格式無效、曲線非
+    # P-256）都必須在產生任何輸出檔之前結束；指紋每次執行都報，讓使用者每次都有
     # 機會發現 public.pem 被掉包。
     $staticPub = Get-RunePublicKey -PublicKeyRef $PublicKeyRef
     $recipientSpki = $staticPub.ExportSubjectPublicKeyInfo()
-    Write-Host ('收件人公鑰指紋：RUNE-KEY {0}' -f (Get-RuneKeyFingerprint -SpkiDer $recipientSpki))
-    Write-Host '（請與解密端 -GenerateKeys / -ExportPublicKey 印出的指紋逐字比對；不符代表公鑰可能已被掉包）'
+    $recipientFingerprint = Get-RuneKeyFingerprint -SpkiDer $recipientSpki
+    Write-Information ('收件人公鑰指紋：RUNE-KEY {0}' -f $recipientFingerprint)
+    Write-Information '（請與解密端 -GenerateKeys / -ExportPublicKey 印出的指紋逐字比對；不符代表公鑰可能已被掉包）'
 
     $plan = Get-RunePackPlan -PackPath $PackPath
     if (-not $plan.Entries -or $plan.Entries.Count -eq 0) {
@@ -34,15 +45,15 @@ function Invoke-RuneSeal {
         throw "輸出檔案已存在：$OutFilePath（如需覆蓋請加上 -Force）"
     }
 
-    Write-Host "打包中：共 $($plan.Entries.Count) 個項目..."
+    Write-Information "打包中：共 $($plan.Entries.Count) 個項目..."
     $zipBytes = New-RuneZipBytes -Entries $plan.Entries
     $originalSize = $zipBytes.Length
 
-    Write-Host '壓縮中（Brotli, SmallestSize）...'
+    Write-Information '壓縮中（Brotli, SmallestSize）...'
     $compressed = Compress-RuneBrotli -InputBytes $zipBytes
     $compressedSize = $compressed.Length
 
-    Write-Host '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
+    Write-Information '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
     $ephemeral = New-RuneEcdhKeyPair
     $aesKey = $null
     try {
@@ -76,9 +87,13 @@ function Invoke-RuneSeal {
     [System.IO.File]::WriteAllText($OutFilePath, $b64Text, [System.Text.Encoding]::ASCII)
     $b64Size = (Get-Item -LiteralPath $OutFilePath).Length
 
-    Write-Host ''
-    Write-Host "完成：$OutFilePath"
-    Write-Host ('原始（打包後、壓縮前）: {0:N0} bytes' -f $originalSize)
-    Write-Host ('壓縮後（Brotli）       : {0:N0} bytes' -f $compressedSize)
-    Write-Host ('Base64 後（輸出檔）    : {0:N0} bytes' -f $b64Size)
+    return [pscustomobject]@{
+        PSTypeName           = 'Rune.SealResult'
+        OutFile              = $OutFilePath
+        RecipientFingerprint = $recipientFingerprint
+        ItemCount            = $plan.Entries.Count
+        OriginalSize         = $originalSize
+        CompressedSize       = $compressedSize
+        Base64Size           = $b64Size
+    }
 }
