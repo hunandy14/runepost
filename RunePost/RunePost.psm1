@@ -3,41 +3,26 @@
 # ==========================================================================
 # RunePost 模組載入器 + 模組層級常數
 #
-# 常數為什麼放在 .psm1 本體而不是 Private/Variables.ps1：
-#   $Script: 範圍在模組裡就是「模組範圍」，dot-source 進來與寫在本體效果相同，
-#   但 Private/ 的規則是「一檔一函式、檔名 = 函式名」，塞一個沒有函式的檔案進去
-#   會破壞那條規則，也讓 $Public.BaseName / $Private.BaseName 這類以檔名為準的
-#   慣例出現例外。常數只有這一處、量也小，放本體讀者一眼就找得到。
-#
-# 舊架構對應：src/container/format-spec.ps1、src/keystore/paths.ps1、
-#             src/keystore/private-paths.ps1、src/keystore/paths-doc.ps1。
-#   paths.ps1 與 private-paths.ps1 原本刻意拆成兩檔，是為了讓 "DefaultKeyFile"
-#   這個符號不出現在 dist/rune-seal.ps1 的原始碼文字裡（負面符號掃描）。單檔
-#   部署已隨模組化放棄——加密端改為複製整個模組資料夾，seal 與 open 共用同一份
-#   程式碼，那個純文字層級的隔離不再成立，兩檔因此合併回這裡。
+# 常數放在 .psm1 本體而不是 Private\ 底下的某個檔案：$Script: 範圍在模組裡就是
+# 「模組範圍」，dot-source 進來與寫在本體效果相同，但 Private\ 的規則是「一檔
+# 一函式、檔名 = 函式名」，塞一個沒有函式的檔案進去會破壞那條規則，也讓
+# $Public.BaseName / $Private.BaseName 這類以檔名為準的慣例出現例外。常數只有
+# 這一處、量也小，放本體讀者一眼就找得到。
 # ==========================================================================
 
-# 這兩行不是新行為，是把舊架構的既有行為搬過來：舊的 dist/rune-*.ps1 在 param
-# 區塊之後就宣告這兩項，整份腳本（含所有函式）都在其效力範圍內。
+# 模組層級的兩項設定。兩者的機制不同：
 #
-# 兩者的機制不同，理由也不同（皆經探針模組實測，模組本身不宣告任何設定）：
+#   Set-StrictMode —— 呼叫端的設定不會傳進模組。不在這裡宣告，模組就永遠跑在
+#     寬鬆模式。
 #
-#   Set-StrictMode —— 呼叫端的設定**不會**傳進模組。實測：呼叫端設
-#     Set-StrictMode -Version Latest 後呼叫模組函式，模組內仍是未生效狀態。
-#     不在這裡宣告，模組就永遠跑在寬鬆模式，與舊架構行為不同。
+#   $ErrorActionPreference —— 呼叫端的設定會被模組函式讀到。在模組範圍宣告是為了
+#     不依賴呼叫端：使用者 Import-Module RunePost 後直接呼叫 Invoke-RuneSeal 時，
+#     session 預設是 Continue，沒有任何入口腳本替他設 Stop。在模組範圍宣告會覆蓋
+#     呼叫端的值，使模組的行為與呼叫者的偏好無關、恆定為 Stop。
 #
-#   $ErrorActionPreference —— 呼叫端的設定**會**被模組函式讀到（實測：呼叫端設
-#     Stop，模組內就讀到 Stop，非終止錯誤確實終止）。所以這行不是為了「修好
-#     繼承」，而是為了**不依賴呼叫端**：使用者 Import-Module RunePost 後直接
-#     呼叫 Invoke-RuneSeal 時，session 預設是 Continue，沒有任何入口腳本替他設
-#     Stop。在模組範圍宣告會覆蓋呼叫端的值，使模組的行為與呼叫者的偏好無關、
-#     恆定為 Stop。
-#
-# 附帶說明（避免後人高估這兩行）：現有錯誤路徑幾乎都走顯式 throw 或 .NET
-# 例外，與 EAP 無關。實測把這兩行分別、一起拿掉共三組，tests\verify.ps1 全套
-# 76 案的結果與對照組完全相同。因此這裡**不宣稱**「不設就會壞」，只宣稱
-# 「設了才不必依賴呼叫端、行為才與呼叫者的偏好無關」。
-# 這是預防性的契約宣告，不是在修一個看得見的 bug。
+# 這是預防性的契約宣告：現有錯誤路徑幾乎都走顯式 throw 或 .NET 例外，與
+# $ErrorActionPreference 無關。這兩行宣稱的不是「不設就會壞」，而是「設了才不必
+# 依賴呼叫端」。「模組被直接呼叫」這條路徑由 tests\verify.ps1 的 C67 / C68 覆蓋。
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -63,9 +48,9 @@ $ErrorActionPreference = 'Stop'
 #      （或用 -PublicKey 指定其他路徑／直接給 PEM 字串本體）。
 #   3. 加密端每次執行 -Pack 都會先印出所用公鑰的指紋，請與解密端印出的逐字比對。
 #
-# 為什麼不內嵌：內嵌只有兩種結果——交付出去的腳本帶著某個人的公鑰（別人拿到就是
-# 加密給他），或維持空字串（拿到不能用，人人都得先編輯腳本）。改成執行期讀檔後，
-# 本工具是與金鑰無關的通用工具，任何人配上自己的 public.pem 即可使用。
+# 為什麼不內嵌：內嵌只有兩種結果——交付出去的程式帶著某個人的公鑰（別人拿到就是
+# 加密給他），或維持空字串（拿到不能用，人人都得先編輯程式）。執行期讀檔則兩者
+# 皆解：本工具是與金鑰無關的通用工具，任何人配上自己的 public.pem 即可使用。
 #
 # 為什麼要有指紋：公鑰檔被掉包會讓使用者靜默地把資料加密給攻擊者，而資料檔被換
 # 比腳本被改更難察覺——腳本有版本控管，~\.rune\public.pem 什麼都沒有。指紋是這條
@@ -131,7 +116,7 @@ $Script:Pkcs8PbeIterations = 600000
 # 載入器：Private 先於 Public（Public 依賴 Private，但 dot-source 只是定義函式，
 # 順序其實不影響解析；先私後公純粹是讀起來合理）。只匯出 Public\ 底下的函式名，
 # 不用萬用字元——FunctionsToExport = '*' 會讓模組自動載入器為了做命令探索而解析
-# 整個模組，是有實測代價的效能陷阱。
+# 整個模組，是有效能代價的。
 # ==========================================================================
 $Private = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Private\*.ps1') -ErrorAction SilentlyContinue)
 $Public = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Public\*.ps1') -ErrorAction SilentlyContinue)

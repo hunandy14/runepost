@@ -35,7 +35,7 @@
     被重導向）一律直接拒絕，不會卡在提示；此時請改用 -Force，或手動處理
     private.key 後重新執行。
 
-    成功輸出只印路徑與指紋，不再印出公鑰 PEM 全文；要看 PEM 內容請自行執行
+    成功輸出只印路徑與指紋，不印出公鑰 PEM 全文；要看 PEM 內容請自行執行
     Get-Content ~\.rune\public.pem。
 
 .PARAMETER Protect
@@ -204,9 +204,7 @@ function Show-RuneDeferredWarning {
 try {
     # Import-Module 放在 try 內：模組資料夾遺失／損壞也走同一個乾淨的錯誤出口，
     # 而不是噴出 PowerShell 原生的多行錯誤記錄。
-    # -Force 保留的量測依據見 rune-seal.ps1 同一段註解：全新行程下 -Force 不花錢
-    # （單次執行 1632ms vs 1635ms，差異在雜訊內），但能保證同一 session 改過模組
-    # 檔後跑到的是磁碟版本，而非 no-op 沿用的舊程式碼。
+    # -Force 保證跑到的一定是磁碟上的版本，理由見 rune-seal.ps1 的同一段註解。
     Import-Module (Join-Path $PSScriptRoot 'RunePost') -Force
 
     switch ($PSCmdlet.ParameterSetName) {

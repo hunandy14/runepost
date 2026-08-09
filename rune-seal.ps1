@@ -56,16 +56,9 @@ try {
     # Import-Module 放在 try 內：模組資料夾遺失／損壞也走同一個乾淨的錯誤出口，
     # 而不是噴出 PowerShell 原生的多行錯誤記錄。
     #
-    # -Force 保留，理由是實測顯示它在這裡不花錢，卻擋掉一個真實的坑：
-    #   成本：本腳本的正常用法是全新 pwsh 行程，模組本來就沒載入過，-Force 沒有
-    #         東西可重載。實測單次完整執行 帶 1632ms / 不帶 1635ms（各 8 次平均），
-    #         差異在雜訊內；純 Import 亦然（1276ms vs 1263ms）。
-    #         -Force 真正要價的是「同一 session 內模組已載入」時的重載（實測
-    #         312ms/次），而這個情況在全新行程裡不會發生。
-    #   效益：若使用者在同一個 session 裡改了模組檔又再跑一次（開發迴圈），
-    #         不帶 -Force 的 Import-Module 對已載入的同路徑模組是 no-op（實測
-    #         5.6ms），會靜默沿用舊程式碼。-Force 保證跑到的一定是磁碟上的版本。
-    # 既然沒有可省的時間，就留著這個保證。
+    # -Force 保證跑到的一定是磁碟上的版本：不帶 -Force 時，Import-Module 對同一
+    # session 內已載入的同路徑模組是 no-op，會靜默沿用舊程式碼。本腳本的常態用法
+    # 是全新 pwsh 行程，此時沒有東西可重載，-Force 不構成成本。
     Import-Module (Join-Path $PSScriptRoot 'RunePost') -Force
 
     # -InformationAction Continue：模組把「收件人公鑰指紋」與逐步進度寫到資訊

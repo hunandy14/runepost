@@ -2,7 +2,7 @@ function Set-RunePrivateKeyAcl {
     <#
         把私鑰檔的存取權限收斂到「檔案擁有者 + SYSTEM」兩個帳號，並中斷繼承。
 
-        不設定的話，檔案完全繼承父目錄的權限。實測一般資料夾繼承下來的項目包含
+        不設定的話，檔案完全繼承父目錄的權限。一般資料夾繼承下來的項目包含
         BUILTIN\Administrators、NT AUTHORITY\SYSTEM、AppContainer SID 與其他已存在
         的授權對象；私鑰匯出到 C:\Temp 或共用資料夾時，這些對象即可讀取私鑰。
 
@@ -12,7 +12,7 @@ function Set-RunePrivateKeyAcl {
         公鑰檔不套用：公鑰本來就是要交出去的。
 
         SetAccessRuleProtection($true, $false)：第一個參數中斷繼承，第二個參數為
-        $false 表示不把原本繼承來的項目複製成明確項目——複製了就等於沒有收斂。
+        $false 表示不把繼承來的項目複製成明確項目——複製了就等於沒有收斂。
 
         目標磁碟不支援 ACL（例如 FAT32 隨身碟）時，Get-Acl／Set-Acl 會失敗。此時
         以警告告知並繼續：私鑰仍然要寫出，只是無法加固權限；為了權限而讓備份整個
