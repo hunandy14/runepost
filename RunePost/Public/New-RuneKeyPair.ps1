@@ -1,4 +1,4 @@
-function New-RuneKeyPair {
+﻿function New-RuneKeyPair {
     <#
         產生 ECDH P-256 金鑰對：私鑰寫到 ~\.rune\private.key，公鑰寫到
         ~\.rune\public.pem。

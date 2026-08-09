@@ -122,8 +122,11 @@ Expand-RuneZip 有兩道路徑檢查：(a) entry 名稱含反斜線一律拒絕�
             "if (`$false) {   # MUTATION M1b：正規化包含性檢查"
         )
         MustRed = @('C37', 'C41', 'C46', 'C47')
-        MayRed = @('C44')
-        Note = 'C44（中途失敗回滾）連帶變紅：不安全的 entry 不再被拒，整包解包直接成功。'
+        MayRed = @('C44', 'C88', 'C89')
+        Note = @'
+C44 / C88（中途失敗回滾）連帶變紅：不安全的 entry 不再被拒，整包解包直接成功。
+C89（例外型別契約）同理：根本沒有例外可擲。
+'@
     }
 
     M1c = @{
@@ -132,7 +135,7 @@ Expand-RuneZip 有兩道路徑檢查：(a) entry 名稱含反斜線一律拒絕�
         Old = "if (-not `$fullResolved.StartsWith(`$destRootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) {"
         New = "if (`$false) {   # MUTATION M1c"
         MustRed = @('C37', 'C47')
-        MayRed = @('C44')
+        MayRed = @('C44', 'C88', 'C89')
         Note = 'C41 / C46 必須維持綠色：反斜線分支仍由另一道檢查擋下，這正是兩案各自覆蓋不同檢查的證據。'
     }
 
@@ -142,7 +145,7 @@ Expand-RuneZip 有兩道路徑檢查：(a) entry 名稱含反斜線一律拒絕�
         Old = "`$info[`$magicBytes.Length + 1] = `$ContentType"
         New = "`$info[`$magicBytes.Length + 1] = 0   # MUTATION M2"
         MustRed = @('C52', 'C08')
-        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54')
+        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54', 'C88', 'C89')
         Note = @'
 C52 變紅：contentType 被竄改後 tag 仍驗得過，錯誤退化成「由較新版本產生」。
 C08 變紅：以 DESIGN §4.2 的規格參數派生出來的金鑰通不過 GCM 驗證 —— 這就是「實作
@@ -295,7 +298,7 @@ C61（-PublicKey 指到不存在的路徑）維持綠色：那是另一個分支
             '                        try { $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead) } catch { $ecdh.ImportECPrivateKey($pkcs8Bytes, [ref] $bytesRead) }   # MUTATION M15'
         )
         MustRed = @('C08')
-        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54')
+        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54', 'C88', 'C89')
         Note = @'
 DESIGN §5.6 規定 Dpapi 這一種格式保護的是「PKCS#8 位元組」。本變異改成保護 SEC1
 EC 私鑰位元組，並讓載入端兩種都吃 —— 於是黑箱上完全看不出差別：檔案照樣是二進位、
@@ -616,11 +619,11 @@ foreach ($name in $names) {
         $path = Join-Path $script:RepoRoot $fileList[$i]
         if (-not (Test-Path -LiteralPath $path)) { throw "$name：找不到目標檔案 $path" }
         if (-not $targets.Contains($path)) {
-            $bytes = [System.IO.File]::ReadAllBytes($path)
             $targets[$path] = [pscustomobject]@{
                 Path  = $path
-                Bytes = $bytes
-                HasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+                # 還原一律寫回這一份原始位元組，因此連 BOM 在內的每一個位元組都會
+                # 回到原狀，與植入時用什麼編碼寫出去無關。
+                Bytes = [System.IO.File]::ReadAllBytes($path)
                 Text  = [System.IO.File]::ReadAllText($path)
                 Pairs = [System.Collections.Generic.List[object]]::new()
             }
@@ -643,7 +646,8 @@ foreach ($name in $names) {
         foreach ($t in $targetList) {
             $mut = $t.Text
             foreach ($p in $t.Pairs) { $mut = $mut.Replace($p.Old, $p.New) }
-            [System.IO.File]::WriteAllText($t.Path, $mut, [System.Text.UTF8Encoding]::new($t.HasBom))
+            # 產品程式碼一律是 UTF-8 with BOM（DESIGN §6.6），植入後照同一種編碼寫回。
+            [System.IO.File]::WriteAllText($t.Path, $mut, [System.Text.UTF8Encoding]::new($true))
         }
         $run = Invoke-Suite -RunName ("run_" + $name) -RunTier $runTier
     }

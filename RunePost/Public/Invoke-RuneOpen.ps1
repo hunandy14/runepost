@@ -37,15 +37,20 @@ function Invoke-RuneOpen {
     $parsed = ConvertFrom-RuneContainer -Bytes $containerBytes
 
     $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath -Passphrase $Passphrase
+    $sharedSecret = $null
     try {
         $sharedSecret = Get-RuneSharedSecretForDecrypt -EphPubKeyDer $parsed.EphPubKey -OwnPrivateKey $ecdh
+        $infoBytes = Get-RuneHkdfInfo -ContentType $parsed.ContentType -EphPubKeyDer $parsed.EphPubKey
+        $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $parsed.Nonce -InfoBytes $infoBytes
     }
     finally {
+        # 派生一併納入這個 try：共享祕密無論派生成功或 Get-RuneDerivedAesKey 中途
+        # 拋錯都在 finally 清零，不留金鑰材料在記憶體中。與加密端同一套紀律。
+        if ($sharedSecret) {
+            [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
+        }
         $ecdh.Dispose()
     }
-    $infoBytes = Get-RuneHkdfInfo -ContentType $parsed.ContentType -EphPubKeyDer $parsed.EphPubKey
-    $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $parsed.Nonce -InfoBytes $infoBytes
-    [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
     try {
         $plain = [byte[]]::new($parsed.Ciphertext.Length)

@@ -1,4 +1,4 @@
-function Get-RunePrivateKeyFormat {
+﻿function Get-RunePrivateKeyFormat {
     <#
         由檔案內容判別私鑰的儲存格式，回傳 'None'、'Passphrase' 或 'Dpapi'：
 

@@ -1,4 +1,4 @@
-function Read-RunePassphrase {
+﻿function Read-RunePassphrase {
     <#
         取得密碼保護 PKCS#8 PEM 所需的密碼，回傳 SecureString。
 

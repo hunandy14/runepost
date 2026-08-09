@@ -1,4 +1,4 @@
-function Get-RunePrivateKeyExportPrompt {
+﻿function Get-RunePrivateKeyExportPrompt {
     <#
         組出「即將匯出私鑰」確認提示的內文；Y/N 的選項由 PowerShell 的 ShouldProcess
         自己補上，這裡只負責內容。

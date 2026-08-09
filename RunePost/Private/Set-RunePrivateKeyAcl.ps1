@@ -1,4 +1,4 @@
-function Set-RunePrivateKeyAcl {
+﻿function Set-RunePrivateKeyAcl {
     <#
         把私鑰檔的存取權限收斂到「檔案擁有者 + SYSTEM」兩個帳號，並中斷繼承。
 

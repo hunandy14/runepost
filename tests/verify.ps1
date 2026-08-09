@@ -9,8 +9,10 @@
 
     結構上的四條規矩：
 
-      1. 受測腳本只在 Invoke-Seal / Invoke-Open 兩個函式裡各出現一次。案例一律
-         透過這兩個語意動詞呼叫受測物，不自己拼參數陣列。
+      1. 啟動受測腳本的呼叫點只有 Invoke-Seal / Invoke-Open 兩處（路徑本身在
+         檔案開頭解析成 $script:SutSeal / $script:SutOpen 兩個常數，另有 C40
+         等案例讀取它們）。案例一律透過這兩個語意動詞呼叫受測物，不自己拼參數
+         陣列。
       2. 「失敗案例必須同時成立」的紀律（不得逾時、必須真的失敗、不得留下輸出檔
          或殘留檔案、錯誤訊息只比對 StdErr）寫在 Expect-SealRefused /
          Expect-OpenRefused 內部，不做成呼叫端要記得加的開關。
@@ -189,8 +191,13 @@ try {
     & $target @args
 }
 catch {
+    # 例外在受測物之外被外殼接住（最典型的是參數繫結失敗——繫結器在腳本本體執行
+    # 之前就拒絕，受測物自己的頂層 catch 根本沒機會跑）。退出碼一律用 1，與使用者
+    # 直接 pwsh -File <受測腳本> 遇到同一件事時 pwsh 自己給的值相同；外殼不得自創
+    # 一個產品端不會出現的退出碼，否則「失敗一律 exit 1」的斷言驗到的是外殼而不是
+    # 受測物。是不是外殼接住的，看 stderr 的 WRAPPER-CAUGHT 前綴即可分辨。
     [Console]::Error.WriteLine('WRAPPER-CAUGHT: ' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message)
-    exit 3
+    exit 1
 }
 if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 exit 0
@@ -321,6 +328,10 @@ $script:Msg = [ordered]@{
     # 私鑰／公鑰不得整份印到畫面上
     'pem.privateblock'    = '-----BEGIN[A-Z ]*PRIVATE KEY-----'
     'pem.publicblock'     = '-----BEGIN PUBLIC KEY-----'
+    # 反面用：PowerShell 錯誤記錄框架的痕跡。入口腳本以 [Console]::Error.WriteLine
+    # 印例外訊息本身，這些標記一個都不該出現在 stderr。純否定樣式，因此在地化的
+    # 說法沒被列進來也不會造成誤判。
+    'errorframe'          = 'CategoryInfo|FullyQualifiedErrorId|ScriptStackTrace|PSMessageDetails|At line:\d+ char:'
 }
 
 # 指紋格式：RUNE-KEY + 8 組 ×4 個大寫 hex，以 '-' 連接（含前綴共 39 字元）
@@ -361,9 +372,12 @@ function Get-Fingerprint {
 #
 #   1. 不得逾時         —— 卡在互動提示等同於永遠不會被發現的失敗。
 #   2. 必須真的失敗     —— exit code 非 0 或 stderr 非空。
-#   3. 不得留下產物     —— 半成品密文／半成品解包比什麼都沒有更糟。
-#   4. 指定的檔案不得被改動。
-#   5. 訊息一律只比對 StdErr —— 受測物的成功輸出含有與錯誤分類重疊的字樣
+#   3. 退出碼必須是 1   —— DESIGN §9 的對外契約。第 2 條允許「exit 0 但 stderr
+#      非空」，那是「有印錯誤卻回報成功」的缺陷形狀，只有單獨釘住退出碼才抓得到。
+#   4. stderr 不得出現 PowerShell 錯誤記錄框架的呼叫堆疊／分類資訊（DESIGN §9）。
+#   5. 不得留下產物     —— 半成品密文／半成品解包比什麼都沒有更糟。
+#   6. 指定的檔案不得被改動。
+#   7. 訊息一律只比對 StdErr —— 受測物的成功輸出含有與錯誤分類重疊的字樣
 #      （seal 每次都印「收件人公鑰指紋：RUNE-KEY …」，裡面就有「公鑰」「RUNE」
 #      「key」），拿 stdout+stderr 合併比對，format / key / nopub 這幾類會無條件
 #      命中。真正的錯誤訊息一律經頂層 catch 寫到 stderr，只比對 StdErr 才是在
@@ -385,6 +399,15 @@ function Expect-Refused {
     )
     Assert (-not $Res.TimedOut) "$What：子行程逾時（可能卡在互動提示）"
     Assert ($Res.Failed) ("$What：應該失敗卻成功了（exit={0}，stderr 空）" -f $Res.ExitCode)
+    # Failed 的定義是「逾時 or exit≠0 or stderr 非空」，因此「exit 0 但 stderr 非空」
+    # 也算失敗。退出碼是對外契約的一部分（DESIGN §9：任何失敗一律 exit 1），必須
+    # 單獨釘住，否則「有印錯誤卻回報成功」這種缺陷在這裡看起來與正常拒絕一樣。
+    Assert ($Res.ExitCode -eq 1) ("$What：失敗時的退出碼應為 1，實際 exit={0}" -f $Res.ExitCode)
+    # DESIGN §9：錯誤訊息是例外訊息本身，不附 PowerShell 錯誤記錄框架的呼叫堆疊與
+    # 分類資訊。用否定樣式驗——這些標記只會出現在 Write-Error／未攔截例外的輸出裡，
+    # 一旦頂層 catch 改回 Write-Error 就會冒出來。
+    Assert (-not (Test-Msg $Res.StdErr 'errorframe')) `
+    ("$What：stderr 出現 PowerShell 錯誤記錄框架的雜訊（呼叫堆疊／分類）：" + (Squash $Res.StdErr 200))
 
     foreach ($p in $NoFile) {
         if (-not $p) { continue }
@@ -676,7 +699,7 @@ function New-ZipWithEntries {
 #      ikm  = ECDH P-256 DeriveRawSecretAgreement 的原始共享祕密（不先雜湊）
 #      salt = nonce
 #      info = magic(4) ‖ version(1) ‖ contentType(1) ‖ ephemeral 公鑰 SPKI DER
-#      輸出 32 bytes，AES-GCM 不使用 AAD
+#      輸出 32 bytes；AES-GCM 不使用 AAD（那條規則在 §4.3，不在 §4.2）
 #    這是密碼學白盒：規格參數派生出來的金鑰若通不過 GCM 驗證，就是實作與規格不符，
 #    直接判 FAIL。
 # ==============================================================================
@@ -823,7 +846,7 @@ function Resolve-ContentKey {
     $info = Get-SpecKdfInfo -Version $Container.Version -ContentType $Container.ContentType -Epk $Container.Epk
     $key = Get-SpecContentKey -SharedSecret $z -Nonce $Container.Nonce -Info $info
 
-    # DESIGN §4.2：AES-GCM 不使用 AAD，tag 只涵蓋 ciphertext。
+    # DESIGN §4.3：AES-GCM 不使用 AAD，tag 只涵蓋 ciphertext。
     $plain = [byte[]]::new($Container.Cipher.Length)
     $gcm = New-AesGcm -Key $key
     try {
@@ -891,7 +914,7 @@ function New-ForgedRune {
 
     $ct = [byte[]]::new($plain.Length); $tag = [byte[]]::new(16)
     $gcm = New-AesGcm -Key $key
-    $gcm.Encrypt($nonce, $plain, $ct, $tag)   # DESIGN §4.2：不使用 AAD
+    $gcm.Encrypt($nonce, $plain, $ct, $tag)   # DESIGN §4.3：不使用 AAD
     $gcm.Dispose()
 
     $all = [System.Collections.Generic.List[byte]]::new()
@@ -1013,8 +1036,10 @@ function New-HomeSandbox {
     }
 }
 
-# 使用者真實家目錄的保護：偵測沙箱逃逸。每一次呼叫受測物之後都會自動執行，
-# 不靠個別案例記得檢查。
+# 使用者真實家目錄的保護：偵測沙箱逃逸。這道檢查掛在 Invoke-Sut（入口腳本路徑）與
+# Invoke-RuneProbe（模組探針路徑）內部，凡經這兩者呼叫受測物之後都會自動執行，
+# 不靠個別案例記得檢查。少數直接使用底層 Invoke-Transfer 的案例（P0、P3、C67、C68）
+# 不經過這道檢查——它們跑的是自己寫的探針腳本，不會動到 ~\.rune。
 $script:RealRuneDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.rune'
 $script:RealKeyPath = Join-Path $script:RealRuneDir 'private.key'
 $script:RealKeyExisted = [System.IO.File]::Exists($script:RealKeyPath)
@@ -1042,7 +1067,7 @@ function Assert-NoHomeEscape {
 }
 
 # ==============================================================================
-# 10. 呼叫點：受測腳本只在這裡出現
+# 10. 呼叫點：啟動受測腳本只發生在這裡
 #
 # 所有案例一律經由 Invoke-Seal / Invoke-Open 呼叫受測物，不自己拼參數陣列、不自己
 # 記得帶沙箱環境變數。預設環境是主測試金鑰 A 的沙箱、預設工作目錄是本套件的工作根。
@@ -1950,7 +1975,7 @@ Invoke-TCase 'C19' '偽造容器（tag 合法但明文非 Brotli）→ 報解壓
     $ct = [byte[]]::new($junk.Length)
     $tag = [byte[]]::new(16)
     $gcm = New-AesGcm -Key $k.Key
-    $gcm.Encrypt($c.Nonce, $junk, $ct, $tag)   # DESIGN §4.2：不使用 AAD
+    $gcm.Encrypt($c.Nonce, $junk, $ct, $tag)   # DESIGN §4.3：不使用 AAD
     $gcm.Dispose()
     $b = [System.Collections.Generic.List[byte]]::new()
     $b.AddRange([byte[]]($c.Bytes[0..($c.HeaderSize - 1)]))
@@ -2095,7 +2120,7 @@ Invoke-TCase 'C33' '-KeyFile 預設值 ~\.rune\private.key（不給 -KeyFile 也
 }
 
 # -GenerateKeys 對「私鑰已存在」的處置（見 rune-open.ps1 的 .DESCRIPTION）：
-#   互動環境 → 印出現有指紋後詢問（預設不繼續）；
+#   互動環境 → 印出現有指紋後詢問（PowerShell 標準確認提示，預設為繼續）；
 #   非互動環境（stdin 被重導向）且無 -Force → 直接拒絕，不卡在提示；
 #   帶 -Force → 略過提示，先把舊的 private.key / public.pem 改名為
 #               <原檔名>.bak-<時間戳>（是改名不是刪除），才寫入新金鑰對。
@@ -2577,6 +2602,92 @@ Invoke-TCase 'C48' '回滾搬移不得破壞 Destination 既有的無關內容' 
     $alpha = [System.IO.File]::ReadAllText((Join-Path $dest 'alpha.txt'))
     $collide = if ($alpha -eq 'alpha') { '同名檔案被覆蓋' } elseif ($alpha -like 'OLD-*') { '同名檔案被保留' } else { "同名檔案內容=$alpha" }
     return ("無關檔案/子目錄完好、無暫存殘留；$collide")
+}
+
+Invoke-TCase 'C88' 'Destination 已有無關內容時解包中途失敗：既有內容完好、不留半成品與暫存資料夾' -Tier Core -Needs @('KdfInfo', 'KeyA') {
+    # C44 驗的是空的 Destination，C48 驗的是成功路徑的合併搬移；兩者都不涵蓋
+    # 「Destination 已經有內容」加上「解包中途失敗」這個組合，而回滾最容易出錯的
+    # 正是這個組合——清暫存資料夾時把既有內容一起掃掉，在空的 Destination 上
+    # 完全看不出來。
+    $root = New-Dir (Join-Path $script:Work 'unpack\rollback_keep')
+    $dest = Clear-Dir (Join-Path $root 'dest')
+    $keep = @(
+        (New-TextFile (Join-Path $dest 'unrelated.txt') 'KEEP-ME')
+        (New-TextFile (Join-Path $dest 'existingdir\note.txt') 'KEEP-ME-TOO')
+        (New-TextFile (Join-Path $dest 'existingdir\deep\deeper.bin') 'KEEP-ME-DEEP')
+        # 與封存內第一筆合法 entry 同名。回滾正確的話搬移根本不會開始，這個檔案
+        # 連被覆蓋的機會都沒有；內容一旦變成 payload 就代表半成品被搬進來了。
+        (New-TextFile (Join-Path $dest 'good1.txt') 'PRE-EXISTING-GOOD1')
+    )
+    $unchanged = @{}
+    foreach ($p in $keep) { $unchanged[$p] = (Get-Sha $p) }
+    $beforeMap = Get-TreeMap $dest
+
+    # 前兩筆合法、第三筆不安全：前兩筆會先落進暫存資料夾，之後才拋錯
+    $zip = New-ZipWithEntries -EntryNames @('good1.txt', 'sub/good2.txt', '../evil.txt')
+    $t = New-ForgedRune -ZipBytes $zip -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'partial_keep.txt')
+    $r = Invoke-Open -Unpack $t -Destination $dest -KeyFile (Get-Fixture 'KeyA').KeyPath
+
+    $outside = Join-Path $root 'evil.txt'
+    $leaked = [System.IO.File]::Exists($outside)
+    if ($leaked) { [System.IO.File]::Delete($outside) }
+    Assert (-not $leaked) '嚴重：../evil.txt 逸出到 Destination 之外'
+
+    # 失敗本身（不逾時、exit 1、stderr 無錯誤框架雜訊）與「既有檔案一個位元都不變」
+    # 交給 Expect-OpenRefused。這裡刻意不給 -Destination：Destination 本來就該有
+    # 東西，不能要求它是空的。也刻意不比對措辭——這一案守的是回滾，不是錯誤分類，
+    # 「不安全的封存路徑」這個語意由 C37 / C41 / C46 / C47 負責。
+    $ev = Expect-OpenRefused -Res $r -What 'Destination 已有內容時的解包中途失敗' `
+        -Unchanged $unchanged -NoFile @((Join-Path $dest 'sub\good2.txt'))
+
+    $tmp = @([System.IO.Directory]::EnumerateDirectories($dest, '.rune-tmp-*'))
+    Assert ($tmp.Count -eq 0) ('殘留暫存資料夾：' + (($tmp | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
+    $diff = Compare-MapExact -Expected $beforeMap -Actual (Get-TreeMap $dest)
+    Assert ($null -eq $diff) ('Destination 的檔案集合與解包前不一致（半成品殘留或既有內容被動到）：' + $diff)
+    $dirs = @([System.IO.Directory]::EnumerateDirectories($dest, '*', [System.IO.SearchOption]::AllDirectories) |
+            ForEach-Object { $_.Substring($dest.Length + 1).Replace('\', '/') } | Sort-Object)
+    Assert (($dirs -join ',') -eq 'existingdir,existingdir/deep') ('Destination 的目錄結構被改動：' + ($dirs -join ','))
+    return ('既有 {0} 檔（含兩層子目錄與一個與封存同名的檔案）SHA 全未變、無半成品、無暫存殘留；{1}' -f $beforeMap.Count, $ev)
+}
+
+Invoke-TCase 'C89' '路徑安全例外的型別契約：擲 SecurityException 且不被包裝成封存格式錯誤' -Tier Core -Needs @('KdfInfo', 'KeyA') {
+    # DESIGN §7.1(3)：違規一律擲 System.Security.SecurityException，該型別在
+    # Invoke-RuneOpen 被專門攔截並原樣上拋，不會被包成「封裝格式錯誤或已損壞」。
+    # 型別是比措辭更穩定的契約——措辭換語系會變，型別不會——但入口腳本只把例外
+    # 訊息寫到 stderr，型別在黑箱上看不見，因此這一案走模組直呼路徑。
+    # 這裡只斷言型別，不斷言措辭：措辭已由 C37 / C41 / C46 / C47 各驗一次。
+    $zip = New-ZipWithEntry -EntryName '../evil-typed.txt'
+    $t = New-ForgedRune -ZipBytes $zip -Path (Join-Path (New-Dir (Join-Path $script:Work 'tamper')) 'sectype.txt')
+    $root = New-Dir (Join-Path $script:Work 'unpack\sectype')
+    $dest = Clear-Dir (Join-Path $root 'dest')
+
+    $r = Invoke-RuneProbe -Name 'sectype' -Body @'
+Import-Module $env:RUNE_MODULE -Force
+try {
+    Invoke-RuneOpen -InFilePath $env:RUNE_TXT -DestinationPath $env:RUNE_DEST -KeyFilePath $env:RUNE_KEY
+    'EXTYPE=(沒有擲出任何例外)'
+}
+catch {
+    'EXTYPE=' + $_.Exception.GetType().FullName
+}
+'DONE'
+'@ -EnvVars @{
+        RUNE_TXT  = $t
+        RUNE_DEST = $dest
+        RUNE_KEY  = (Get-Fixture 'KeyA').KeyPath
+    }
+
+    Assert (-not $r.TimedOut) '探針逾時'
+    Assert ($r.StdOut -match 'DONE') ('探針未跑完：' + (Squash $r.All 220))
+    $kv = ConvertFrom-ProbeOutput -Text $r.StdOut
+    Assert ($kv['EXTYPE'] -eq 'System.Security.SecurityException') `
+    ('不安全的封存路徑擲出的例外型別不是 System.Security.SecurityException（被換型別或被包裝了）：' + $kv['EXTYPE'])
+
+    $left = Get-TreeMap $dest
+    Assert ($left.Count -eq 0) ('已拒絕卻仍寫出檔案：' + (($left.Keys | Select-Object -First 5) -join ','))
+    $dirs = @([System.IO.Directory]::EnumerateDirectories($dest, '*', [System.IO.SearchOption]::AllDirectories))
+    Assert ($dirs.Count -eq 0) ('已拒絕卻殘留目錄（含暫存資料夾）：' + (($dirs | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
+    return ('模組直呼路徑上例外型別為 {0}，未被包成一般的封裝格式錯誤；Destination 無殘留' -f $kv['EXTYPE'])
 }
 
 Invoke-TCase 'C49' '深層長路徑 roundtrip（暫存資料夾前綴不得撐爆路徑長度）' -Tier Full -Needs @('Fx', 'KeyA') {

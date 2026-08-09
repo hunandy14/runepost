@@ -1,4 +1,4 @@
-function Get-RunePrivateKeyProtectNote {
+﻿function Get-RunePrivateKeyProtectNote {
     <#
         回傳私鑰保護方式的說明文字，供摘要輸出與確認提示共用，使同一種格式在各處
         以同一組詞彙呈現。

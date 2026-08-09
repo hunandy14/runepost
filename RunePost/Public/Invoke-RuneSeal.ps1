@@ -1,4 +1,4 @@
-# ==========================================================================
+﻿# ==========================================================================
 # 區塊：-Pack 主流程
 # ==========================================================================
 
@@ -55,6 +55,7 @@ function Invoke-RuneSeal {
 
     Write-Information '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
     $ephemeral = New-RuneEcdhKeyPair
+    $sharedSecret = $null
     $aesKey = $null
     try {
         $sharedSecret = $ephemeral.DeriveRawSecretAgreement($staticPub.PublicKey)
@@ -65,13 +66,16 @@ function Invoke-RuneSeal {
 
         $infoBytes = Get-RuneHkdfInfo -ContentType $Script:ContentTypeFileTree -EphPubKeyDer $ephPubKeyDer
         $aesKey = Get-RuneDerivedAesKey -SharedSecret $sharedSecret -Nonce $nonce -InfoBytes $infoBytes
-        [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
 
         $aes = Protect-RuneAesGcm -PlainBytes $compressed -AesKey $aesKey -Nonce $nonce
     }
     finally {
-        # 與解密端一致：無論成功或中途拋錯，aesKey 一律在 finally 清零，
-        # 不因 Protect-RuneAesGcm 拋例外而讓金鑰殘留在記憶體中未被清除。
+        # 共享祕密與 aesKey 一律在 finally 清零，無論成功或中途拋錯：派生（
+        # Get-RuneDerivedAesKey）或加密（Protect-RuneAesGcm）拋例外時，金鑰材料
+        # 都不得殘留在記憶體中未被清除。與解密端同一套紀律。
+        if ($sharedSecret) {
+            [Array]::Clear($sharedSecret, 0, $sharedSecret.Length)
+        }
         if ($aesKey) {
             [Array]::Clear($aesKey, 0, $aesKey.Length)
         }
