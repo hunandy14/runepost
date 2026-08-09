@@ -293,9 +293,13 @@ $script:Msg = [ordered]@{
     # 無關；兩種語系的說法都留著，才不會因為開發機的語系設定而假紅。
     'stage.param'   = 'Parameter set|參數|ParameterBinding|不能同時|互斥|cannot be resolved|Missing an argument|遺失|必要|Mandatory|ParameterArgumentValidation|cannot be found'
     # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞。
-    # 這幾個字一個都不會出現在退化後的「Archive format error: <entry>」裡，
-    # 也不會被 ../ ..\ 這類 entry 名稱本身命中。
-    'stage.unsafe'  = 'unsafe|escape|traversal|zip.?slip|outside the destination'
+    #
+    # 這條樣式只認完整詞組，不認單字 escape：退化後的訊息是
+    # 「Archive format error: <entry>」，**entry 名稱照樣被印出來**，而 C37 用的
+    # entry 就叫 ../escaped.txt——樣式裡只要有 escape，就會被 entry 名稱本身命中，
+    # M7 於是紅不了 C37（M7 的其餘三案 ..\pwned.txt、..\evil\、../evil2/ 沒有這個
+    # 字，所以會紅，單看那三案還以為樣式有效）。這正是變異測試存在的理由。
+    'stage.unsafe'  = 'unsafe archive path|path traversal|zip.?slip'
     # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息
     'stage.curve'   = 'P-?256|prime256|nistP256|curve'
 

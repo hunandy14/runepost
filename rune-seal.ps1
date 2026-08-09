@@ -1,5 +1,4 @@
-﻿#Requires -Version 7.4
-<#
+﻿<#
 .SYNOPSIS
     runepost encrypting side. Sends files one way between two Windows machines you own, over a public plain-text channel such as a forum post or a pastebin.
 
@@ -19,6 +18,23 @@
     the only way to recover it. Confirm that the recipient holds a private key backup
     (rune-open.ps1 -ExportPrivateKey) before sending any ciphertext.
 
+.PARAMETER Pack
+    The file, folder, or wildcard to encrypt. A folder is packed recursively and keeps its
+    directory structure, including empty subdirectories. A wildcard expands in its own folder
+    only and does not recurse; matched directories are skipped with a warning.
+
+.PARAMETER OutFile
+    The output path of the ciphertext file. The default is <input name>.txt in the current
+    working directory. An existing file is not overwritten unless -Force is specified.
+
+.PARAMETER Force
+    Overwrite an existing -OutFile.
+
+.PARAMETER PublicKey
+    The recipient public key. A string containing -----BEGIN is treated as the PEM content
+    itself; any other string is treated as a file path. When it is not specified, the key is
+    read from ~\.rune\public.pem.
+
 .EXAMPLE
     .\rune-seal.ps1 C:\data\report.docx
     Packs, compresses, and encrypts a single file into report.docx.txt, using the
@@ -32,6 +48,10 @@
     path. Pass a multi-line PEM through a variable or a here-string rather than typing it
     on the command line.
 #>
+# #Requires 必須排在 comment-based help 之後：help 區塊只能被「註解與空行」前置，
+# 而 #Requires 在 AST 裡是 statement 不是註解，擺在前面會讓 Get-Help 整個看不到這段
+# help，只印出自動產生的語法列。#Requires 本身不必在第一行也照樣生效。
+#Requires -Version 7.4
 [CmdletBinding()]
 # 本腳本是 CLI 入口，職責就是把模組回傳的結果印給使用者看。Write-Host 在這裡是
 # 正確的工具：訊息要無條件出現在畫面上，又不能混進任何回傳值。模組側一律回傳

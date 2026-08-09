@@ -1,5 +1,4 @@
-﻿#Requires -Version 7.4
-<#
+﻿<#
 .SYNOPSIS
     runepost decrypting side and key management. Sends files one way between two Windows machines you own, over a public plain-text channel such as a forum post or a pastebin.
 
@@ -136,6 +135,8 @@
     the private key is a passphrase-protected PKCS#8 PEM, the passphrase is requested. In a
     non-interactive session, pass it with -Passphrase.
 #>
+# #Requires 必須排在 comment-based help 之後，理由見 rune-seal.ps1 的同一段註解。
+#Requires -Version 7.4
 [CmdletBinding(DefaultParameterSetName = 'Unpack')]
 # 本腳本是 CLI 入口，職責就是把模組回傳的結果印給使用者看。Write-Host 在這裡是
 # 正確的工具：訊息要無條件出現在畫面上，又不能混進任何回傳值。模組側一律回傳

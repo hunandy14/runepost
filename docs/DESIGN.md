@@ -572,6 +572,12 @@ P-256 曲線 OID、PBKDF2 迭代次數）寫在 `.psm1` 本體而不是 `Private
 兩支入口腳本是薄殼，職責只有四件事：
 
 1. 宣告 comment-based help 與參數集，由 PowerShell 的參數繫結器負責互斥與必填。
+   **help 區塊必須排在 `#Requires` 之前。** comment-based help 只能被「註解與空行」
+   前置，而 `#Requires` 在 AST 裡是 statement 不是註解；擺在 help 之前會讓
+   `Get-Help` 完全看不到這段 help，只印出自動產生的語法列——而且不報任何錯，
+   從程式行為上看不出來。`#Requires` 本身不必在第一行也照樣生效。
+   兩支腳本的每個參數都要有 `.PARAMETER` 段：參數若沒有 `.PARAMETER`，`Get-Help`
+   會改用宣告上方的一般註解當說明，於是繁中的程式碼註解會被印給使用者看。
 2. `Import-Module (Join-Path $PSScriptRoot 'RunePost') -Force`，放在 `try` 內，
    使模組資料夾遺失或損壞也走同一個乾淨的錯誤出口。
 3. 呼叫模組函式並把回傳物件排版印給使用者。
