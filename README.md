@@ -66,7 +66,12 @@ RunePost\         實作模組（整個資料夾，含 .psd1 / .psm1 / Public\ /
 
 ## 快速開始
 
-以下所有輸出都是實際執行結果，只把家目錄路徑縮寫成 `C:\Users\alice`。
+**程式印出來的一切都是英文**（摘要、進度、警告、錯誤訊息、確認提示，以及
+`Get-Help` 看到的說明）；本文件的敘述維持中文，引用的輸出則原樣照抄。
+
+以下所有輸出都是實際執行結果，只把沙箱路徑代換成易讀的示意路徑：家目錄
+`` `C:\Users\alice` ``、工作目錄 `` `C:\work` ``、備份目錄 `` `D:\backup` ``、
+解密目的地 `` `C:\out\restored` ``。
 
 ### 1. 在解密端產生金鑰對
 
@@ -75,13 +80,13 @@ pwsh .\rune-open.ps1 -GenerateKeys
 ```
 
 ```
-已產生 ECDH P-256 金鑰對（私鑰保護方式：未加密的 PKCS#8 PEM）
-  私鑰  C:\Users\alice\.rune\private.key   (未加密的 PKCS#8 PEM)
-  公鑰  C:\Users\alice\.rune\public.pem
-  指紋  RUNE-KEY BE1B-1948-2E90-4BD4-D377-52D2-978E-6436
-WARNING: 私鑰以未加密的 PKCS#8 PEM 儲存於 C:\Users\alice\.rune\private.key。
-WARNING: 任何能讀取此檔案的人，都能解開所有以對應公鑰加密的密文。
-WARNING: 請勿將此檔案置於雲端同步資料夾或版本控管目錄。
+Created an ECDH P-256 key pair. Private key protection: unencrypted PKCS#8 PEM.
+  Private key  C:\Users\alice\.rune\private.key   (unencrypted PKCS#8 PEM)
+  Public key   C:\Users\alice\.rune\public.pem
+  Fingerprint  RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+WARNING: The private key is stored as an unencrypted PKCS#8 PEM at C:\Users\alice\.rune\private.key.
+WARNING: Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.
+WARNING: Do not place this file in a cloud-sync folder or a version-control directory.
 ```
 
 **預設的私鑰是未加密的**，理由與其他兩種選項見「金鑰管理」。
@@ -95,9 +100,9 @@ WARNING: 請勿將此檔案置於雲端同步資料夾或版本控管目錄。
 沒有這個檔案時，加密端會直接告訴你缺什麼：
 
 ```
-找不到公鑰：C:\Users\alice\.rune\public.pem（預設路徑）。請先在解密端執行
-rune-open.ps1 -GenerateKeys，把印出的 public.pem 複製到本機
-C:\Users\alice\.rune\public.pem，或用 -PublicKey 指定其他路徑或 PEM 字串。
+Cannot find the recipient public key: C:\Users\alice\.rune\public.pem (default path).
+Run 'rune-open.ps1 -GenerateKeys' on the decrypting machine, then copy 'public.pem' to C:\Users\alice\.rune\public.pem.
+Alternatively, specify a different location or a PEM string with -PublicKey.
 ```
 
 ### 3. 在加密端加密
@@ -108,16 +113,16 @@ pwsh .\rune-seal.ps1 C:\data\report
 ```
 
 ```
-收件人公鑰指紋：RUNE-KEY BE1B-1948-2E90-4BD4-D377-52D2-978E-6436
-（請與解密端 -GenerateKeys / -ExportPublicKey 印出的指紋逐字比對；不符代表公鑰可能已被掉包）
-打包中：共 2 個項目...
-壓縮中（Brotli, SmallestSize）...
-加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...
+Recipient public key fingerprint: RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+Compare it character by character with the fingerprint printed by -GenerateKeys or -ExportPublicKey on the decrypting machine. A mismatch means the public key may have been replaced.
+Packing 2 items...
+Compressing (Brotli, SmallestSize)...
+Encrypting (ECDH P-256 + HKDF-SHA256 + AES-256-GCM)...
 
-完成：C:\work\report.txt
-原始（打包後、壓縮前）: 229 bytes
-壓縮後（Brotli）       : 117 bytes
-Base64 後（輸出檔）    : 336 bytes
+Done: C:\work\report.txt
+Packed, before compression : 261 bytes
+Compressed with Brotli     : 133 bytes
+Base64 output file         : 356 bytes
 ```
 
 第一行的指紋**每次執行都會印**。第一次使用時務必與步驟 1 印出的逐字比對；
@@ -132,8 +137,8 @@ Base64 後（輸出檔）    : 336 bytes
 `report.txt` 的內容就是純 Base64，每 76 字元換行：
 
 ```
-UlVORQIBWwAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASPm/IcqX9SfcPlw/DDpQv80spQ8F1N
-H+4R7EmN/nVfkAG+bhXpytT0sBZs+Lpl96ly74nRiH+1NPV/qNY9VNGGKlTsDCIhXbR11QAO+mPf
+UlVORQIBWwAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQRh6QjHOiLdCkAO4h242JvQiybfOEf
+zP0BmrwSCVLyqEHYS0mfb615Rz7OYMMvTZDsAZigKCF1hTj5ofNopgac0MO1f5wjMb/IN3Omb/g2
 ...
 ```
 
@@ -147,7 +152,7 @@ pwsh .\rune-open.ps1 -Unpack report.txt -Destination C:\out\restored
 ```
 
 ```
-解密完成，檔案已還原至：C:\out\restored
+Decryption complete. Files were restored to: C:\out\restored
 ```
 
 `-Unpack` 與 `-Destination` 也可以省略參數名稱依序放位置：
@@ -194,11 +199,14 @@ pwsh .\rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem -Forc
 ```
 
 ```
-已匯出私鑰（格式：未加密的 PKCS#8 PEM）
-  來源  C:\Users\alice\.rune\private.key
-  輸出  D:\backup\rune-private.pem
-  指紋  RUNE-KEY BE1B-1948-2E90-4BD4-D377-52D2-978E-6436
-還原方式：rune-open.ps1 -Unpack <密文檔> -Destination <目的資料夾> -KeyFile D:\backup\rune-private.pem
+Exported the private key. Format: unencrypted PKCS#8 PEM.
+  Source       C:\Users\alice\.rune\private.key
+  Output       D:\backup\rune-private.pem
+  Fingerprint  RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+To decrypt with this backup: rune-open.ps1 -Unpack <ciphertext file> -Destination <destination folder> -KeyFile D:\backup\rune-private.pem
+WARNING: The private key is stored as an unencrypted PKCS#8 PEM at D:\backup\rune-private.pem.
+WARNING: Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.
+WARNING: Do not place this file in a cloud-sync folder or a version-control directory.
 ```
 
 匯出**來源可以是 DPAPI 私鑰**——這是把 DPAPI 私鑰離機保存的唯一途徑。輸出格式用
@@ -209,8 +217,8 @@ pwsh .\rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem -Forc
 `-Force` 會直接被拒絕：
 
 ```
-私鑰匯出已中止：目前為非互動環境（標準輸入已重新導向），無法顯示確認提示。
-請加上 -Confirm:$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。
+Cannot export the private key: this is a non-interactive session (standard input is redirected), so the confirmation prompt cannot be displayed.
+Specify -Confirm:$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session.
 ```
 
 ### 補回或重印公鑰
@@ -222,10 +230,10 @@ pwsh .\rune-open.ps1 -ExportPublicKey
 ```
 
 ```
-已重新導出公鑰
-  私鑰  C:\Users\alice\.rune\private.key
-  公鑰  C:\Users\alice\.rune\public.pem
-  指紋  RUNE-KEY BE1B-1948-2E90-4BD4-D377-52D2-978E-6436
+Re-exported the public key.
+  Private key  C:\Users\alice\.rune\private.key
+  Public key   C:\Users\alice\.rune\public.pem
+  Fingerprint  RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
 ```
 
 它同時是「再看一次我的指紋」的工具，隨時可以拿來與加密端核對。

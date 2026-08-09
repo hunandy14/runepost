@@ -4,6 +4,13 @@
 安全性質與驗證方式。內容與 repo 內的程式碼描述同一件事；當本文件與實作不一致時，
 以本文件的規範條文（§3、§4、§5）為準，並視為實作缺陷處理。
 
+**語言分工。** 程式執行時印給使用者看的一切——摘要、進度、警告、錯誤訊息、確認
+提示，以及 `Get-Help` 會印出來的 comment-based help——**一律英文**；程式碼註解與
+本文件的敘述維持繁體中文。本文件引用或展示的輸出、錯誤訊息字串因此是英文原文。
+英文文案的風格比照官方 PowerShell：陳述句、句首大寫、句尾句點，先陳述問題再給
+補救動作，多個補救選項分行列出，參數與路徑原樣呈現，不對使用者做價值判斷。
+`RUNE`、`RUNE-KEY`、參數名、檔名與路徑一律不翻譯。
+
 | 項目 | 內容 |
 |---|---|
 | 專案名 | runepost |
@@ -237,8 +244,8 @@ header 中需要密碼學保護的只有 contentType，由 `info` 承擔（§4.4
 
 | 檢查位置 | 「位元被竄改」的訊息 | 「較新版本產生」的訊息 |
 |---|---|---|
-| 解析時（`ConvertFrom-RuneContainer`） | 誤報成「不支援的內容型別」 | 正確 |
-| **解密成功後（`Invoke-RuneOpen`）** | 正確：「內容驗證失敗…可能被竄改或損壞」 | 正確：「本容器的內容型別 0xNN 由較新版本的 Rune 產生」 |
+| 解析時（`ConvertFrom-RuneContainer`） | 誤報成「內容型別不支援」 | 正確 |
+| **解密成功後（`Invoke-RuneOpen`）** | 正確：`Content verification failed (the AES-GCM authentication tag does not match). The ciphertext may have been tampered with or corrupted in transit.` | 正確：`The content type 0xNN in this container was produced by a newer version of Rune. Update rune-open.ps1.` |
 
 因為 contentType 已進 `info`，**tag 驗過就等於這個 byte 是真品**；此時若值仍未知，
 才能斷定是本程式版本落後而非資料損毀。
@@ -293,10 +300,10 @@ header 中需要密碼學保護的只有 contentType，由 `info` 承擔（§4.4
 
 | 情況 | 行為 |
 |---|---|
-| 公鑰檔不存在（預設路徑） | 報「找不到公鑰：`<path>`（預設路徑）」，並指引到解密端執行 `-GenerateKeys`、把 `public.pem` 複製過來，或改用 `-PublicKey` |
-| 公鑰檔不存在（`-PublicKey` 指定的路徑） | 報「找不到公鑰：`<path>`（-PublicKey 指定的路徑）」，指引改為「確認路徑是否正確」。使用者已經指出要去哪找，缺的是那個檔案，不是「該把檔案放哪」 |
-| 檔案存在但非合法 PEM | 報「公鑰 PEM 格式無效，無法載入：…」 |
-| 曲線非 P-256 | 報「公鑰不是 P-256：曲線 OID 為 …，本工具僅支援 P-256（…）」 |
+| 公鑰檔不存在（預設路徑） | 報 `Cannot find the recipient public key: <path> (default path).`，並分行指引到解密端執行 `rune-open.ps1 -GenerateKeys`、把 `public.pem` 複製到該路徑，或改用 `-PublicKey` |
+| 公鑰檔不存在（`-PublicKey` 指定的路徑） | 報 `Cannot find the recipient public key: <path>.`，第二行 `The location was specified with -PublicKey. Verify that the path is correct.`。使用者已經指出要去哪找，缺的是那個檔案，不是「該把檔案放哪」，因此**不得出現**「把 `public.pem` 複製到該路徑」那句 |
+| 檔案存在但非合法 PEM | 報 `The recipient public key PEM is not valid and cannot be loaded: …` |
+| 曲線非 P-256 | 報 `The recipient public key is not P-256: the curve OID is …. This tool supports P-256 (…) only.` |
 
 四者皆 exit 1 且不產生任何輸出檔。
 
@@ -419,9 +426,10 @@ PBKDF2 迭代次數取 OWASP 對 PBKDF2-HMAC-SHA256 的建議值。該參數會�
 **比對順序必須先 1 後 2**：後者的標記是前者的子字串，順序相反會把加密 PEM 誤判為
 未加密 PEM。DPAPI 位元組是二進位，以 UTF-8 解碼後不會命中任何標記。
 
-長度為 0 的私鑰檔在判別之前就先擋下並直接報「空檔案」——落進第 3 條會報成 DPAPI
-解保護失敗，與實情不符，使用者會去查 DPAPI 與使用者設定檔，而真正的問題只是檔案
-是空的。
+長度為 0 的私鑰檔在判別之前就先擋下，直接報
+`Cannot read the private key: <path> is an empty file (0 bytes) and holds no key material.`
+——落進第 3 條會報成 DPAPI 解保護失敗，與實情不符，使用者會去查 DPAPI 與使用者
+設定檔，而真正的問題只是檔案是空的。訊息因此也不得提及 DPAPI。
 
 三種格式匯入後一律驗證曲線為 P-256。
 
@@ -570,7 +578,9 @@ P-256 曲線 OID、PBKDF2 迭代次數）寫在 `.psm1` 本體而不是 `Private
 4. 頂層 `catch` 以 `[Console]::Error.WriteLine` 印出**例外訊息本身**並 `exit 1`。
    不用 `Write-Error`，以避免 PowerShell 錯誤記錄框架附加的呼叫堆疊與分類等雜訊。
    寫出的是精簡訊息而不必然是單行：`WriteLine` 只呼叫一次，但訊息本身可以內嵌
-   換行（非互動拒絕是兩行、`-ExportPrivateKey -Protect Dpapi` 的拒絕是三行）。
+   換行——「先陳述問題、再分行給補救動作」這條文案原則（§9）本來就會產生多行訊息，
+   例如非互動拒絕與「輸出檔已存在」是兩行、`-ExportPrivateKey -Protect Dpapi` 的
+   拒絕是三行、「找不到收件人公鑰」是三到四行。
 
 **模組一律回傳物件、不印字；呈現只發生在入口腳本這一層。** `Write-Host` 在入口腳本
 是正確的工具——訊息要無條件出現在畫面上，又不能混進任何回傳值；兩支腳本因此各自
@@ -599,7 +609,7 @@ P-256 曲線 OID、PBKDF2 迭代次數）寫在 `.psm1` 本體而不是 `Private
 
 | 項目 | 決定 | 理由 |
 |---|---|---|
-| 原始碼檔案 | **UTF-8 with BOM**，`.ps1` / `.psm1` / `.psd1` 全部一致，無例外 | 程式碼含大量中文錯誤訊息與 help。PowerShell 7 讀無 BOM 的 UTF-8 沒有問題，但使用者會直接執行入口腳本，BOM 讓非 PowerShell 7 的 host 也能正確解碼中文；模組檔一併統一，避免同一個目錄裡兩種編碼並存，也讓依檔案內容做替換的工具（`tests/mutate.ps1`）不必為編碼分歧特判 |
+| 原始碼檔案 | **UTF-8 with BOM**，`.ps1` / `.psm1` / `.psd1` 全部一致，無例外 | 使用者可見輸出與 help 已全面英文化，但程式碼註解仍含大量中文。PowerShell 7 讀無 BOM 的 UTF-8 沒有問題，但使用者會直接執行入口腳本，BOM 讓非 PowerShell 7 的 host 也能正確解碼中文註解；模組檔一併統一，避免同一個目錄裡兩種編碼並存，也讓依檔案內容做替換的工具（`tests/mutate.ps1`）不必為編碼分歧特判 |
 | 換行 | 一律 LF，由 `.gitattributes` 的 `*.ps1 / *.psm1 / *.psd1 text eol=lf` 固定 | 沒有這條，開發者機器上的 `core.autocrlf` 會讓任何以雜湊比對檔案內容的檢查隨機失敗 |
 | 密文輸出檔 | ASCII | Base64 字元集本就在 ASCII 內，不引入編碼變因 |
 | 私鑰與公鑰 PEM | UTF-8 無 BOM | PEM 是 ASCII 文字；BOM 會讓部分標準工具解析失敗 |
@@ -625,9 +635,9 @@ P-256 曲線 OID、PBKDF2 迭代次數）寫在 `.psm1` 本體而不是 `Private
 
 | 欄位 | 拒絕階段 | 錯誤表現 | 案例 |
 |---|---|---|---|
-| magic | 解析（`ConvertFrom-RuneContainer`），早於任何金鑰操作 | 「容器格式錯誤：檔頭 magic 不符」 | C13、C50 |
-| version | 解析，緊接 magic 之後 | 「版本不符」 | C14 |
-| contentType | GCM 解密——解析階段只擷取不驗證（§4.5） | 「內容驗證失敗（GCM 認證標籤不符）」 | C52 |
+| magic | 解析（`ConvertFrom-RuneContainer`），早於任何金鑰操作 | `The container format is not valid: the header magic does not match (read '…').` | C13、C50 |
+| version | 解析，緊接 magic 之後 | `The container version does not match: …` | C14 |
+| contentType | GCM 解密——解析階段只擷取不驗證（§4.5） | `Content verification failed (the AES-GCM authentication tag does not match).` | C52 |
 
 contentType 是唯一走到 GCM 才被擋下的欄位，也因此是唯一**必須**綁進 HKDF `info`
 的欄位（§4.4）；另外兩個在解析階段就已逐位元組比對過模組常數，`info` 裡的那兩段
@@ -639,8 +649,8 @@ contentType 是唯一走到 GCM 才被擋下的欄位，也因此是唯一**必�
 
 | 竄改後的值 | 表現 |
 |---|---|
-| 大到 `8 + len + 12 + 16` 超過容器總長 | 解析階段的長度檢查擋下，報「容器格式錯誤：長度不足以包含完整的 ephemeral 公鑰／nonce／tag」 |
-| 偏小 | 截短的位元組不是合法的 SubjectPublicKeyInfo DER，報「容器內的 ephemeral 公鑰格式無效」（ASN.1 匯入失敗） |
+| 大到 `8 + len + 12 + 16` 超過容器總長 | 解析階段的長度檢查擋下，報 `The container format is not valid: the length is too short to hold the complete ephemeral public key, nonce, and tag.` |
+| 偏小 | 截短的位元組不是合法的 SubjectPublicKeyInfo DER，報 `The ephemeral public key in the container is not valid: …`（ASN.1 匯入失敗） |
 | 偏大但仍在總長內 | ephemeral 公鑰段多吃了後面的位元組——`info` 與 nonce／tag／ciphertext 的分界一起位移，最終以 GCM 認證失敗告終 |
 
 header 也沒有任何機密性，它本來就是明文。
@@ -654,8 +664,10 @@ header 也沒有任何機密性，它本來就是明文。
 含反斜線就一定不是自家封裝）；entry 路徑正規化後必須仍在
 「目的資料夾 + 目錄分隔符」之下，否則拒絕。兩道檢查都在「entry 是否為目錄」的分支
 **之前**執行，因此目錄 entry 同樣受檢。違規一律擲
-`System.Security.SecurityException`，該型別在 `Invoke-RuneOpen` 被專門攔截並原樣
-上拋，不會被包裝成「封裝格式錯誤或已損壞」——否則使用者會把攻擊誤讀成檔案壞掉。
+`System.Security.SecurityException`，訊息為
+`Unsafe archive path detected (…): <entry>`。該型別在 `Invoke-RuneOpen` 被專門
+攔截並原樣上拋，不會被包裝成 `ZIP extraction failed. The archive format is not
+valid, or the archive is corrupted.`——否則使用者會把攻擊誤讀成檔案壞掉。
 第二道檢查涵蓋第一道的全部輸入；第一道存在的價值是給出精確的錯誤原因。
 四個分支（檔案 entry 的 `../` 與 `..\`、目錄 entry 的 `../` 與 `..\`）由
 C37 / C41 / C46 / C47 各守一案，措辭一併驗；**例外型別**另由 C89 在模組直呼路徑上
@@ -790,11 +802,20 @@ pwsh -File .\tests\verify.ps1 -RepoRoot <repo 根目錄> -Tier Full   # 全部
    訊息一律只比對 StdErr。退出碼要單獨釘住，是因為「必須真的失敗」的判準是
    「逾時 or exit≠0 or stderr 非空」，「exit 0 但 stderr 非空」也會通過，而那正是
    「有印錯誤卻回報成功」的缺陷形狀。只比對 StdErr 這一條同樣是必要的：受測物的
-   成功輸出含有與錯誤分類重疊的字樣（seal 每次都印「收件人公鑰指紋：RUNE-KEY …」），
-   拿合併輸出比對會讓數種分類無條件命中。
+   成功輸出含有與錯誤分類重疊的字樣（seal 每次都印
+   `Recipient public key fingerprint: RUNE-KEY …`），拿合併輸出比對會讓數種分類
+   無條件命中。
 3. **措辭斷言集中在 `$script:Msg` 這張期望訊息表**，案例本體只做行為斷言。值一律
    是正則，取用一律經 `Get-MsgPattern`，鍵名打錯會立刻拋錯而不是靜默退化成比對空
-   樣式。使用者可見輸出換語系時只要改這張表。
+   樣式。使用者可見輸出換語系時只要改這張表。表內有三條與本工具文案無關、隨
+   PowerShell host 的 UI 文化在地化的框架樣式（`stage.param`、`whatif.line`、
+   `errorframe`），一律並列中英兩種說法。
+   **反面樣式（`-Forbid`）與對應的正面樣式必須互不包含**，否則會靜默假綠。目前有
+   兩組需要留意：`tampered` 只認 `tamper` 與 `authentication tag`，`typeorversion`
+   只認 `content type` / `newer version` / `unsupported`；`contenttype` 一律寫成
+   完整詞組 `content type`，不用 `content` 一個字——GCM 認證失敗的訊息開頭是
+   `Content verification failed`，只比對 `content` 會讓 C52 的 `-Forbid` 無條件
+   命中。
 4. **共用素材是惰性 fixture**，案例以 `-Needs` 宣告相依，取用發生在案例本體之前，
    因此 `-Filter` / `-Tier` 篩出的任意子集都能單獨執行。fixture 建立失敗會被記住
    （負向記憶）：producer 不重跑，第一個撞上的案例拿到完整原因，其後依賴同一份素材
@@ -847,12 +868,12 @@ pwsh -File .\tests\mutate.ps1 -Mutation M6 -Tier Full
 
 | 類別 | 守的是什麼 |
 |---|---|
-| 路徑安全（M1 / M1b / M1c / M7） | zip-slip 兩道檢查各自確實被覆蓋，且錯誤訊息保有「不安全的封存路徑」這個獨立語意，不可被「格式損壞」搪塞 |
+| 路徑安全（M1 / M1b / M1c / M7） | zip-slip 兩道檢查各自確實被覆蓋，且錯誤訊息保有 `Unsafe archive path detected` 這個獨立語意，不可被 `Archive format error` 搪塞 |
 | 密碼學規格符合性（M2 / M15） | contentType 確實綁進 HKDF info；DPAPI 保護的確實是 §5.6 所寫的 PKCS#8 位元組。這兩者在黑箱上都看不出差別，只有規格白盒抓得到 |
 | 金鑰一次性（M3） | nonce 確實來自隨機來源 |
 | 秘密不外洩（M4） | 私鑰 PEM 不得出現在畫面上 |
 | 檔案權限（M5） | 私鑰檔的 ACL 收斂確實生效 |
-| 完整性檢查（M6） | GCM tag 驗證失敗必須中止，且訊息必須點名「被竄改」而非退化成下游的解壓失敗 |
+| 完整性檢查（M6） | GCM tag 驗證失敗必須中止，且訊息必須點名 tampered 而非退化成下游的解壓失敗 |
 | 相依方向（M8 / M9） | C63 / C64 咬的是靜態相依方向而非執行結果，因此植入的是永遠不會執行到的呼叫 |
 | 確認機制（M10） | 呼叫端 session 的 `$ConfirmPreference` 不得讓確認被跳過 |
 | 訊息語意（M11 / M12 / M13 / M14） | 有專屬語意要求的錯誤（曲線不符、非互動拒絕、空檔案、公鑰 PEM 無效）不得被一般錯誤搪塞。這一組都不動任何檢查：仍然拒絕、仍然不留下檔案、exit code 不變，只有措辭退化 |
@@ -863,8 +884,11 @@ pwsh -File .\tests\mutate.ps1 -Mutation M6 -Tier Full
 正式開跑前先跑一次未植入任何變異的對照組並要求全綠——對照組不綠時，所有「植入後
 有紅」的否定性結論都不可信。
 
-`Old` 字串必須在目標檔案中逐字命中，找不到即報錯中止。**修改產品程式碼（含註解）
-時，若動到某項變異所引用的那幾行，必須同步更新變異定義**，否則該項變異會失效。
+`Old` 字串必須在目標檔案中逐字命中，找不到即報錯中止。**修改產品程式碼（含註解與
+錯誤訊息文案）時，若動到某項變異所引用的那幾行，必須同步更新變異定義**，否則該項
+變異會失效。17 項變異共引用 22 個 `Old` 片段，其中 9 個（M6、M7 兩個、M11、M12
+三個、M13、M14）就是錯誤訊息的字面，動文案必然要一併改；改完應逐項確認每個片段
+在目標檔案中**恰好命中一次**，命中兩次會讓一次替換改掉兩處。
 
 ### 8.3 CI
 
@@ -887,17 +911,46 @@ pwsh -File .\tests\mutate.ps1 -Mutation M6 -Tier Full
 |---|---|
 | 成功 | exit 0；結果摘要寫到 stdout |
 | 任何失敗 | exit 1；錯誤訊息寫到 stderr。寫出的是例外訊息本身，不附 PowerShell 錯誤記錄框架的呼叫堆疊與分類資訊；訊息可以內嵌換行，行數不是契約（§6.4） |
-| 使用者在確認提示選擇不繼續 | exit 0；印「已取消，未變更任何檔案。」 |
+| 使用者在確認提示選擇不繼續 | exit 0；印 `Cancelled. No files were changed.` |
 
-錯誤訊息的撰寫原則：
+錯誤訊息的撰寫原則（**一律英文**，風格比照官方 PowerShell）：
 
+- **陳述句，句首大寫，句尾句點。** 不用驚嘆號、不用表情符號、不對使用者做價值判斷
+  （不寫 dangerous、never do this），要說後果就直接陳述後果。
+- **先陳述問題，再給補救動作。** 多個補救選項分行列出，不塞進同一句。常用句式：
+  `Cannot find …`、`Cannot read …`、`Unable to …`、`… already exists.`、
+  `Specify -Force to …`、`The … is not valid: …`。
+- **參數、路徑、檔名原樣呈現**（`-GenerateKeys`、`public.pem`、`~\.rune\private.key`），
+  不用 "that file"、"the parameter above" 這類指代。`RUNE`、`RUNE-KEY`、參數名、
+  檔名與路徑一律不翻譯。
 - **點名環節。** 使用者要能從訊息判斷失敗發生在打包、公鑰載入、私鑰載入、Base64
   解碼、GCM 認證、Brotli 解壓還是解包搬移。
 - **給出路。** 凡是使用者有辦法處理的失敗，訊息必須說明下一步能做什麼（補上
   `-Force`、以 `-Passphrase` 傳入 SecureString、到解密端執行 `-GenerateKeys` 等）。
-- **不以泛泛的失敗搪塞有專屬語意的錯誤。** 「不安全的封存路徑」不可說成「格式
-  損壞」；「空檔案」不可說成「DPAPI 解保護失敗」；「曲線不符」不可說成「載入失敗」。
-  這些語意由 §8.2 的變異測試逐一驗證。
+- **不以泛泛的失敗搪塞有專屬語意的錯誤。** `Unsafe archive path detected` 不可說成
+  `Archive format error`；`is an empty file (0 bytes)` 不可說成
+  `DPAPI unprotect failed`；`is not P-256: the curve OID is …` 不可說成
+  `Cannot load the recipient public key`。這些語意由 §8.2 的變異測試逐一驗證。
+
+全專案共用的術語表（同一個概念在訊息、help 與文件中一律用同一個詞）：
+
+| 概念 | 用語 |
+|---|---|
+| 收件人公鑰 | recipient public key |
+| 私鑰 | private key |
+| 金鑰對 | key pair |
+| 容器 | container |
+| 密文 | ciphertext |
+| 目的資料夾 | destination folder |
+| 密碼 | passphrase |
+| 指紋 | fingerprint |
+| 私鑰的靜態保護方式 | protection mode |
+| 封存（ZIP） | archive |
+| 曲線 | curve |
+| 內容型別 | content type |
+| 非互動環境 | non-interactive session |
+| 竄改 | tampered |
+| 損壞 | corrupted |
 
 模組本身不決定訊息如何呈現：所有錯誤以例外形式往上拋，由入口腳本的頂層 `catch`
 統一輸出。
