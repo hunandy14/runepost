@@ -63,8 +63,14 @@ function Export-RunePrivateKey {
         throw "私鑰匯出失敗：輸出路徑的資料夾不存在：$outDir"
     }
 
-    # 確認提示到底會不會出現：-WhatIf 不問，-Confirm:$false（或呼叫端把
-    # $ConfirmPreference 設成 None）也不問。-Force 不在這個判斷裡——它只管覆蓋。
+    if (-not $PSBoundParameters.ContainsKey('Confirm')) {
+        # 匯出私鑰一律需要確認，不接受從呼叫端 session 繼承來的 $ConfirmPreference
+        # 作為「不用問」的依據，理由同 New-RuneKeyPair。要免除確認就明確寫
+        # -Confirm:$false；-Force 只管覆蓋，不代表略過確認。
+        $ConfirmPreference = 'High'
+    }
+
+    # 確認提示到底會不會出現：-WhatIf 不問，-Confirm:$false 也不問。
     $willConfirm = (-not $WhatIfPreference) -and ($ConfirmPreference -ne 'None')
 
     # 非互動防呆疊在 ShouldProcess 之外，理由同 New-RuneKeyPair：不依賴 host 是否

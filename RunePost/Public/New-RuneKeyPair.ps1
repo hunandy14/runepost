@@ -15,7 +15,8 @@ function New-RuneKeyPair {
 
         既有私鑰會被改名保留，屬破壞性動作，因此宣告 ConfirmImpact High：預設就會
         要求確認，-Force（或 -Confirm:$false）略過，-WhatIf 則只說明將要發生什麼、
-        不寫入任何檔案。
+        不寫入任何檔案。確認只針對這條覆蓋路徑——尚未有金鑰時沒有既有檔案會被動到，
+        即使帶了 -Confirm 也不會詢問。
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     [OutputType([pscustomobject])]
@@ -33,11 +34,17 @@ function New-RuneKeyPair {
         $backupPlan = Get-RuneKeyBackupPaths
     }
 
-    # 高衝擊的是「覆蓋既有金鑰」而不是「產生金鑰」本身：第一次產生不會動到任何既有
-    # 檔案，所以不主動問。-Force 則是「不要問」的慣例寫法。兩者都讓使用者明確寫出
-    # 的 -Confirm 勝出。
-    if ((-not $keyExists -or $Force) -and -not $PSBoundParameters.ContainsKey('Confirm')) {
+    if (-not $keyExists) {
+        # 高衝擊的是「覆蓋既有金鑰」而不是「產生金鑰」本身：第一次產生不會動到任何
+        # 既有檔案，沒有東西需要確認。
         $ConfirmPreference = 'None'
+    }
+    elseif (-not $PSBoundParameters.ContainsKey('Confirm')) {
+        # 覆蓋既有金鑰不可逆，因此不接受從呼叫端 session 繼承來的 $ConfirmPreference
+        # 作為「不用問」的依據——自動化用的 profile 常把它設成 None，繼承下去就是
+        # 沒帶 -Force 也靜默輪替金鑰。沒有明確表態一律問，要免除就寫 -Force（慣例
+        # 寫法）或 -Confirm:$false。
+        $ConfirmPreference = if ($Force) { 'None' } else { 'High' }
     }
 
     # 確認提示到底會不會出現：-WhatIf 不問，$ConfirmPreference = None 也不問。

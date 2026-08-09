@@ -211,6 +211,9 @@ try {
 
     switch ($PSCmdlet.ParameterSetName) {
         'GenerateKeys' {
+            # 這裡不綁 -Confirm：明確綁定的 -Confirm 會蓋過函式內部的判斷，而「金鑰
+            # 存不存在、有沒有東西值得問」只有模組答得出來。確認不被呼叫端 session
+            # 的 $ConfirmPreference 跳過，由 New-RuneKeyPair 自己保證。
             $result = New-RuneKeyPair -Protect $Protect -Passphrase $Passphrase -Force:$Force `
                 -WarningVariable keyWarnings -WarningAction SilentlyContinue
             if ($result) {
@@ -235,11 +238,13 @@ try {
         }
         'ExportPrivateKey' {
             # CLI 的 -Force 一次表達兩件事：略過確認、允許覆蓋既有的 -OutFile。模組
-            # 函式把這兩件事分開，所以在這一層拆成 -Confirm:$false 與 -Force 兩個
-            # 開關；不帶 -Force 時明確送出 -Confirm:$true，確保確認提示不會因為
-            # 呼叫端 session 的 $ConfirmPreference 而被跳過。
+            # 函式把這兩件事分開，所以在這一層把「略過確認」翻成 -Confirm:$false，
+            # 而且只在帶 -Force 時才綁定：明確綁定的 -Confirm 會蓋過函式內部的判斷，
+            # 不帶 -Force 時交給 Export-RunePrivateKey 自己決定（它一律要求確認）。
+            $confirmArg = @{}
+            if ($Force) { $confirmArg['Confirm'] = $false }
             $result = Export-RunePrivateKey -OutFilePath $OutFile -KeyFilePath $KeyFile -Protect $Protect `
-                -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force -Confirm:(-not $Force) `
+                -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force @confirmArg `
                 -WarningVariable keyWarnings -WarningAction SilentlyContinue
             if ($result) {
                 Write-Host "已匯出私鑰（格式：$($result.ProtectNote)）"

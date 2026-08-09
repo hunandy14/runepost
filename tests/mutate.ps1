@@ -238,6 +238,22 @@ C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，
         MayRed = @()
         Note = 'C63 的反方向，理由同 M8：以不會執行到的呼叫證明 C64 咬的是相依方向而非行為。'
     }
+
+    M10 = @{
+        Desc = '覆蓋既有金鑰的確認改為沿用呼叫端繼承來的 $ConfirmPreference'
+        File = 'RunePost\Public\New-RuneKeyPair.ps1'
+        Old = "        `$ConfirmPreference = if (`$Force) { 'None' } else { 'High' }"
+        New = "        if (`$Force) { `$ConfirmPreference = 'None' }   # MUTATION M10：不覆寫繼承來的偏好"
+        MustRed = @('C87')
+        MayRed = @()
+        Note = @'
+這正是獨立審查抓到的缺陷形狀：呼叫端 session 只要有 $ConfirmPreference = 'None'
+（自動化 profile 常見），ShouldProcess 與疊在它外面的非互動防呆會一起失效，已有
+金鑰又沒帶 -Force 也會靜默輪替並 exit 0。C34 對這個缺陷咬不動——它跑在
+$ConfirmPreference 預設值 High 之下，看不出「偏好被繼承」這件事，因此必須另有
+C87 專門走 None 這條路徑。
+'@
+    }
 }
 
 # ==============================================================================
