@@ -9,11 +9,14 @@
     #>
     param([string] $Path, [bool] $IsUserSpecified)
 
+    $nl = [Environment]::NewLine
     if ($IsUserSpecified) {
-        return "找不到公鑰：$Path（-PublicKey 指定的路徑）。請確認路徑是否正確；" +
-        "若尚未取得 public.pem，請先在解密端執行 rune-open.ps1 -GenerateKeys 產生後傳給加密端，" +
-        "或改用 -PublicKey 直接傳入 PEM 字串本體。"
+        return "Cannot find the recipient public key: $Path." + $nl +
+        "The location was specified with -PublicKey. Verify that the path is correct." + $nl +
+        "To create a key pair, run 'rune-open.ps1 -GenerateKeys' on the decrypting machine." + $nl +
+        "-PublicKey also accepts the PEM content itself instead of a path."
     }
-    return "找不到公鑰：$Path（預設路徑）。請先在解密端執行 rune-open.ps1 -GenerateKeys，" +
-    "把印出的 public.pem 複製到本機 $Path，或用 -PublicKey 指定其他路徑或 PEM 字串。"
+    return "Cannot find the recipient public key: $Path (default path)." + $nl +
+    "Run 'rune-open.ps1 -GenerateKeys' on the decrypting machine, then copy 'public.pem' to $Path." + $nl +
+    "Alternatively, specify a different location or a PEM string with -PublicKey."
 }

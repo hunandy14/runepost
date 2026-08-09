@@ -13,11 +13,11 @@
     param([pscustomobject] $BackupPlan)
 
     $existingFp = Get-RuneExistingKeyFingerprint -KeyFilePath $Script:DefaultKeyFile
-    if (-not $existingFp) { $existingFp = '無法讀取' }
+    if (-not $existingFp) { $existingFp = 'Cannot be read' }
 
     return (@(
-            "  現有指紋  $existingFp"
-            "繼續會產生新金鑰，舊金鑰改名保留為 $($BackupPlan.KeyBackup)"
-            "舊密文仍可解：rune-open.ps1 -Unpack <檔> -Destination <夾> -KeyFile $($BackupPlan.KeyBackup)"
+            "  Existing fingerprint  $existingFp"
+            "Continuing creates a new key pair. The existing private key is renamed to $($BackupPlan.KeyBackup)."
+            "Existing ciphertext can still be decrypted: rune-open.ps1 -Unpack <ciphertext file> -Destination <destination folder> -KeyFile $($BackupPlan.KeyBackup)"
         ) -join [Environment]::NewLine)
 }

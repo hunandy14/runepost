@@ -14,12 +14,12 @@
     )
 
     $lines = @(
-        "  來源  $SourceKeyPath"
-        "  輸出  $OutFilePath"
-        "  格式  $(Get-RunePrivateKeyProtectNote -Protect $Protect)"
+        "  Source  $SourceKeyPath"
+        "  Output  $OutFilePath"
+        "  Format  $(Get-RunePrivateKeyProtectNote -Protect $Protect)"
     )
     if ($Protect -eq 'None') {
-        $lines += '匯出檔沒有加密保護，任何能讀取該檔案的人，都能解開所有以對應公鑰加密的密文。'
+        $lines += 'The exported file has no encryption. Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.'
     }
     return ($lines -join [Environment]::NewLine)
 }

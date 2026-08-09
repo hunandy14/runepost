@@ -6,9 +6,9 @@
     param([string] $Protect)
 
     switch ($Protect) {
-        'None' { return '未加密的 PKCS#8 PEM' }
-        'Passphrase' { return '密碼保護的 PKCS#8 PEM' }
-        'Dpapi' { return 'DPAPI，僅本機本帳號可解' }
+        'None' { return 'unencrypted PKCS#8 PEM' }
+        'Passphrase' { return 'passphrase-protected PKCS#8 PEM' }
+        'Dpapi' { return 'DPAPI, readable only on this machine under this Windows account' }
         default { return $Protect }
     }
 }

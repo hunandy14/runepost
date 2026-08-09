@@ -39,7 +39,7 @@
         Set-Acl -LiteralPath $Path -AclObject $acl
     }
     catch {
-        Write-Warning "無法收斂私鑰檔的存取權限：$Path（$($_.Exception.Message)）"
-        Write-Warning '檔案已寫出，但權限沿用所在資料夾的繼承設定，請自行確認沒有其他人可以讀取。'
+        Write-Warning "Cannot restrict the access permissions on the private key: $Path. $($_.Exception.Message)"
+        Write-Warning 'The file was written, but its permissions are inherited from the parent folder. Verify that no other account can read it.'
     }
 }

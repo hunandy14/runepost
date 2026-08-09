@@ -11,7 +11,7 @@
         Rename-Item -LiteralPath $Script:DefaultKeyFile -NewName (Split-Path -Leaf $KeyBackupPath) -ErrorAction Stop
     }
     catch {
-        throw "備份既有私鑰檔失敗，未產生新金鑰：$($_.Exception.Message)"
+        throw "Cannot back up the existing private key. No new key pair was created. $($_.Exception.Message)"
     }
 
     if (Test-Path -LiteralPath $Script:DefaultPublicKeyFile) {
@@ -20,7 +20,7 @@
         }
         catch {
             Rename-Item -LiteralPath $KeyBackupPath -NewName (Split-Path -Leaf $Script:DefaultKeyFile) -ErrorAction SilentlyContinue
-            throw "備份既有公鑰檔失敗，已還原私鑰檔案，未產生新金鑰：$($_.Exception.Message)"
+            throw "Cannot back up the existing public key. The private key was restored to its original name and no new key pair was created. $($_.Exception.Message)"
         }
     }
 }

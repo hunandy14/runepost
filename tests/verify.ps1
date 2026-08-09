@@ -279,21 +279,42 @@ function Invoke-Transfer {
 
 $script:Msg = [ordered]@{
     # --- 錯誤環節分類 ---
-    'stage.base64'  = 'base64|Base64|BASE64|編碼|解碼|encod|decod'
-    'stage.format'  = 'magic|RUNE|格式|標頭|檔頭|header|不符|無法辨識|not a valid|不是|無效'
-    'stage.version' = '版本|version|不支援|unsupported|0x0|格式|magic'
-    'stage.key'     = '私鑰|金鑰|key|解鑰|DPAPI|解不開|讀不到|無法讀取|無法解密|not found|decrypt|unprotect'
-    'stage.tag'     = '損壞|竄改|corrupt|tamper|驗證失敗|校驗|完整性|tag|GCM|authentication|內容'
-    'stage.unzip'   = '解壓|解壓縮|decompress|Brotli|brotli|壓縮|zip|ZIP|解包|封存|archive|損壞'
-    'stage.nopub'   = '公鑰|public key|public\.pem'
-    'stage.exists'  = '已存在|存在|exists|Force|覆蓋|overwrite'
-    'stage.nomatch' = '找不到|沒有|未符合|不符合|沒有符合|no file|match|符合|空'
-    'stage.input'   = '找不到|不存在|not found|無效|invalid|路徑|path'
+    #
+    # 一律用「多詞片語」而不是單字。單字樣式的問題不是它今天會不會誤命中，而是
+    # 它把「樣式有效」這件事押在受測資料剛好不含那個字上——C37 就是這樣失效的：
+    # stage.unsafe 曾經含單字 escape，而該案的 zip entry 就叫 ../escaped.txt，
+    # 退化後的訊息照樣印出 entry 名稱，於是樣式被受測資料自己命中，M7 紅不了它。
+    # 每條片語都取自對應訊息的固定骨幹，措辭改了就會紅，這正是期望訊息表要的。
+    'stage.base64'  = 'Base64 decoding failed'
+    'stage.format'  = 'container format is not valid|header magic does not match|public key in the container is not valid'
+    'stage.version' = 'container version does not match|supports version'
+    'stage.key'     = 'private key|public key|DPAPI unprotect|ECDH key agreement'
+    'stage.tag'     = 'authentication tag|verification failed|tampered with|may be corrupted|is corrupted|AES-GCM decryption failed'
+    'stage.unzip'   = 'Brotli decompression failed|ZIP extraction failed|archive format is not valid|may be corrupted'
+    'stage.nopub'   = 'public key|public\.pem'
+    'stage.exists'  = 'already exists|Specify -Force to overwrite'
+    'stage.nomatch' = 'matching the wildcard|no file to pack|nothing to pack'
+    'stage.input'   = 'Cannot find the specified path|Cannot find the input file'
+    # PowerShell 參數繫結器自己的訊息，不是本工具的文案，**隨 host 的 UI 文化在地化**
+    # ——同一個繫結失敗在 zh-TW 的 pwsh 上印中文、在 en-US 上印英文。因此這裡刻意
+    # 並列中英兩種說法：**這不是英文化的漏網，請不要把中文那幾段刪掉**，刪了會讓
+    # 這條樣式在中文語系的開發機上假紅。whatif.line 同理。
+    # （errorframe 不在此列：它比對的 CategoryInfo、ScriptStackTrace 等是屬性名稱，
+    # 　不隨語系變動，所以只有英文。）
     'stage.param'   = 'Parameter set|參數|ParameterBinding|不能同時|互斥|cannot be resolved|Missing an argument|遺失|必要|Mandatory|ParameterArgumentValidation|cannot be found'
-    # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞
-    'stage.unsafe'  = '不安全|逸出|逃逸|穿越|越界|非法路徑|不合法的路徑|路徑不安全|traversal|unsafe|zip.?slip'
-    # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息
-    'stage.curve'   = 'P-?256|prime256|nistP256|曲線'
+    # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞。
+    #
+    # 這條樣式只認完整詞組，不認單字 escape：退化後的訊息是
+    # 「Archive format error: <entry>」，**entry 名稱照樣被印出來**，而 C37 用的
+    # entry 就叫 ../escaped.txt——樣式裡只要有 escape，就會被 entry 名稱本身命中，
+    # M7 於是紅不了 C37（M7 的其餘三案 ..\pwned.txt、..\evil\、../evil2/ 沒有這個
+    # 字，所以會紅，單看那三案還以為樣式有效）。這正是變異測試存在的理由。
+    'stage.unsafe'  = 'unsafe archive path|path traversal|zip.?slip'
+    # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息。
+    # curve 不能只寫單字：M11 退化後的訊息是「…the OID is <oid>」，只要樣式裡有
+    # 單字 curve 而訊息又剛好提到 curve（例如某天改成 curve mismatch）就會假綠。
+    # 取 'curve OID' 這個片語，並保留曲線名稱本身這幾個必須出現的 token。
+    'stage.curve'   = 'P-?256|prime256|nistP256|curve OID'
 
     # --- 出路指引：錯誤訊息要告訴使用者下一步能做什麼 ---
     'hint.force'         = '-Force'
@@ -304,30 +325,49 @@ $script:Msg = [ordered]@{
     'hint.keyfile'       = 'private\.key'
 
     # --- 具體措辭 ---
-    'notfound'            = '找不到|不存在|not found'
-    'noninteractive'      = '非互動'
-    'passphrase'          = '密碼'
-    # 只寫一個「空」字會被「空白」「空的」這類無關字眼命中，等於樣式失效；
+    'notfound'            = 'cannot find|not found|does not exist'
+    'noninteractive'      = 'non-interactive'
+    'passphrase'          = 'passphrase'
+    # 只寫一個 empty 會被「empty folder」這類無關字眼命中，等於樣式失效；
     # 要求的是「明講這個檔案本身是空的」這句話。
-    'emptyfile'           = '是空檔案|檔案為空|內容為空|空檔案|empty file|file is empty'
+    'emptyfile'           = 'empty file|file is empty|0 bytes'
     'legacymagic'         = 'CTXT'
     'dpapi'               = 'DPAPI'
     'fingerprint'         = 'RUNE-KEY'
-    'pubkey.badpem'       = '公鑰 PEM 格式無效，無法載入'
-    'pubkey.explicitpath' = '-PublicKey 指定的路徑'
-    # 反面用：-PublicKey 指到使用者自己給的路徑時，不該再叫他「複製到本機 <該路徑>」
-    'pubkey.copyhint'     = '複製到本機'
-    'plainkey.format'     = '未加密的 PKCS#8 PEM'
-    'plainkey.warning'    = '任何能讀取此檔案的人'
-    'contenttype'         = '型別|content.?type'
-    'newerversion'        = '較新版本|新版|請更新|update|newer'
-    'tampered'            = '竄改|tamper|認證標籤'
+    'pubkey.badpem'       = 'public key PEM is not valid'
+    'pubkey.explicitpath' = 'specified with -PublicKey'
+    # 反面用：-PublicKey 指到使用者自己給的路徑時，不該再叫他「把 public.pem 複製到
+    # <該路徑>」——他已經指出要去哪找了，缺的是那個檔案，不是「該把檔案放哪」。
+    'pubkey.copyhint'     = "copy 'public\.pem' to"
+    'plainkey.format'     = 'unencrypted PKCS#8 PEM'
+    'plainkey.warning'    = 'Anyone who can read this file'
+    # contenttype / typeorversion 一律寫成「content type」這個完整詞組，不用
+    # 'content' 一個字：GCM 認證失敗的訊息開頭是「Content verification failed」，
+    # 只比對 content 會讓 typeorversion 這條反面樣式無條件命中，C52 就永遠假綠。
+    'contenttype'         = 'content type|content-type'
+    'newerversion'        = 'newer version|Update rune-open'
+    # tampered 與 typeorversion 必須互不包含：前者只認 tampered with 與
+    # authentication tag，後者只認 content type / newer version / unsupported，
+    # 兩組字在兩則訊息裡各自只出現在自己那一則。
+    #
+    # 這裡刻意寫片語 'tampered with' 而不是詞幹 'tamper'：C12／C13／C14 的目的資料夾
+    # 就叫 tamper_b64 / tamper_magic / tamper_ver，而 -Unpack 有一條錯誤路徑會把
+    # Destination 原樣印進訊息（搬移失敗那則）。今天那條路徑在這幾案上不會走到，
+    # 但「樣式有效與否取決於受測資料剛好沒命中」正是 C37 失效的形狀，不留這個縫。
+    'tampered'            = 'tampered with|authentication tag'
     # 反面用：contentType 被竄改時不得被說成「型別不支援 / 版本較新」
-    'typeorversion'       = '型別|content.?type|較新版本|不支援'
-    'wildcard.skipdir'    = 'WARNING|警告|略過|跳過|不遞迴|skip'
+    'typeorversion'       = 'content type|content-type|newer version|unsupported'
+    # WARNING 是 PowerShell 警告串流的前綴（證明它真的走警告串流而不是一般輸出），
+    # 其餘取片語而非單字 skip。
+    'wildcard.skipdir'    = 'WARNING|Skipped the directory|not recursive'
     # 私鑰／公鑰不得整份印到畫面上
     'pem.privateblock'    = '-----BEGIN[A-Z ]*PRIVATE KEY-----'
     'pem.publicblock'     = '-----BEGIN PUBLIC KEY-----'
+    # PowerShell 的 -WhatIf 預演行前綴由框架產生，**隨 host 的 UI 文化在地化**
+    # （en-US 印 "What if:"、zh-TW 印「如果:」），不是本工具的文案。因此刻意並列
+    # 中英兩種說法：**這不是英文化的漏網，請不要把中文那一段刪掉**，刪了會讓 C84
+    # 在中文語系的開發機上假紅。stage.param 同理。
+    'whatif.line'         = 'What if|如果'
     # 反面用：PowerShell 錯誤記錄框架的痕跡。入口腳本以 [Console]::Error.WriteLine
     # 印例外訊息本身，這些標記一個都不該出現在 stderr。純否定樣式，因此在地化的
     # 說法沒被列進來也不會造成誤判。
@@ -1692,6 +1732,169 @@ Invoke-TCase 'P6' '沙箱家目錄已備妥 public.pem，且與 -GenerateKeys �
     return ('沙箱 ~\.rune\public.pem 就緒，指紋 RUNE-KEY {0} 與印出值逐字相符；seal / open 皆直接對原檔執行，全程未製作任何腳本副本' -f $expect)
 }
 
+Invoke-TCase 'P7' '變異目錄與產品程式碼同步：每個 Old 恰好命中一次、對應的 New 尚未存在、每一項都真的改得動' -Tier Core {
+    <#
+        守的是「變異工具本身可用」。tests\mutate.ps1 自己只檢查 Old 是否 Contains
+        （≥1 次），命中兩次會讓一次 Replace 靜默改掉兩處，植入的缺陷就不是目錄上
+        寫的那一個，而報表照樣顯示 OK。這個檢查以前每輪靠人工腳本做、做完就刪——
+        是個每輪都依賴、卻沒有任何機制保證它會被執行的步驟。做成常設案例之後，
+        每次跑驗收都會驗一次，不必靠人記得。
+
+        三條斷言，逐項逐片段：
+
+        (1) Old 恰好命中一次，且**依 mutate.ps1 的實際行為逐對累進比對**。它做的是
+            foreach ($p in $t.Pairs) { $mut = $mut.Replace($p.Old, $p.New) }，
+            也就是第 2 對是對「已經套過第 1 對」的文字做替換。只拿原始文字數會漏掉
+            對間干擾——第 2 對的 Old 出現在第 1 對的 New 裡，原始文字上看是 1 次，
+            實際套用時卻不是。
+
+        (2) New 在**原始**文字中命中 0 次。這條刻意不用累進文字：M7 兩對的 New 是
+            同一個字串，第 2 對套用時第 1 對的 New 已經在了，拿累進文字數會假紅。
+            這條今天是靠每個 New 都帶 '# MUTATION <名>' 標記而自動成立；本案的作用
+            是把那個慣例從「大家都這樣寫」變成「寫錯就會紅」。
+
+        (3) 每一對的 Old 必須不等於 New，且整份檔案套完之後內容必須真的改變。
+            Old = New 的筆誤會讓變異變成空操作；空操作在 MustRed 非空的項目上會報
+            「斷言失效」還算看得出來，但在 **MustRed 刻意為空的 M1 上會報 OK**——
+            什麼都沒植入，卻宣稱「兩道檢查的涵蓋關係」這個否定性結論成立。
+
+        植入期間本案不適用：產品程式碼此時正處於被刻意改壞的狀態，Old 當然找不到。
+        以 mutate.ps1 自己的 RUNNING 標記偵測並 SKIP。對照組跑在 Set-RunLock 之前，
+        因此「未植入時目錄是自洽的」這件事仍然每輪都被驗到。
+
+        但「看到 RUNNING 就 SKIP」本身有個洞：mutate.ps1 的 Clear-RunLock 只在最終
+        雜湊等於基線時才執行（那個 fail-safe 是對的——雜湊不符時 repo 真的不可信，
+        旗標就該留著），因此變異工具被強制中斷後 RUNNING 會留在磁碟上，本案從此
+        永遠 SKIP。摘要行雖然會顯示 SKIP 1，但只看退出碼的 CI 完全察覺不到，而這
+        一案正是守護整套變異工具可信度的那一案，被靜默停用最不該發生。
+
+        因此改看 RUNNING 的**修改時間**：mutate.ps1 每植入一項就把它往前推一次
+        （Update-RunLock 心跳），所以在真正執行中的變異測試裡，這個時間距今不會
+        超過「單輪驗收套件的執行時間」（Full 約兩分鐘）。超過門檻即判定為殘留，
+        直接 FAIL 並說明怎麼清掉，而不是繼續靜默 SKIP。
+    #>
+    $mutPath = Join-Path $script:RepoRoot 'tests\mutate.ps1'
+    Assert ([System.IO.File]::Exists($mutPath)) "找不到變異目錄檔案：$mutPath"
+
+    # 門檻取單輪驗收套件執行時間（Full 約兩分鐘）的十餘倍，留足機器忙碌時的餘裕；
+    # 不必大於整輪變異測試的總時間，因為有心跳。
+    $staleMinutes = 30
+    $lockFile = Join-Path $script:RepoRoot 'tests\_mutwork\RUNNING'
+    if ([System.IO.File]::Exists($lockFile)) {
+        $lockAge = [DateTime]::UtcNow - [System.IO.File]::GetLastWriteTimeUtc($lockFile)
+        Assert ($lockAge.TotalMinutes -le $staleMinutes) (
+            ("殘留的變異測試旗標：{0}`n" +
+            "最後更新於 {1:yyyy-MM-dd HH:mm:ss}（{2:N0} 分鐘前），超過 {3} 分鐘門檻，" +
+            "代表上一次變異測試被強制中斷而沒有清掉旗標。`n" +
+            "本案會因為這個旗標而 SKIP，等於整套變異工具的守門斷言被靜默停用。`n" +
+            "跑一次 pwsh -File .\tests\mutate.ps1 -List 即可自動還原殘骸並清除旗標。") -f `
+                $lockFile, [System.IO.File]::GetLastWriteTime($lockFile), $lockAge.TotalMinutes, $staleMinutes)
+        Skip-Case ('變異植入期間（tests\_mutwork\RUNNING 於 {0:N1} 分鐘前更新），產品程式碼正處於被植入狀態，本案不適用' -f $lockAge.TotalMinutes)
+    }
+
+    $mt = $null; $me = $null
+    $mutAst = [System.Management.Automation.Language.Parser]::ParseFile($mutPath, [ref]$mt, [ref]$me)
+    Assert ($me.Count -eq 0) ('mutate.ps1 解析錯誤 {0} 個：{1}' -f $me.Count, (Squash ($me[0].Message) 120))
+
+    $assign = @($mutAst.FindAll({
+                param($n)
+                $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Left.Extent.Text -eq '$script:Catalog'
+            }, $true))
+    Assert ($assign.Count -eq 1) ('mutate.ps1 裡的 $script:Catalog 指派不是恰好一處（{0} 處），本案讀不到變異目錄' -f $assign.Count)
+
+    # 只求值那一個 hashtable 字面，不 dot-source mutate.ps1 本體（那會真的跑起來）。
+    # 求值之前先確認右側確實是字面而非命令呼叫，免得「讀目錄」變成執行任意程式碼。
+    $rhs = $assign[0].Right
+    Assert ($rhs -is [System.Management.Automation.Language.CommandExpressionAst]) '$script:Catalog 的右側不是單一運算式，拒絕求值'
+    $expr = $rhs.Expression
+    if ($expr -is [System.Management.Automation.Language.ConvertExpressionAst]) { $expr = $expr.Child }
+    Assert ($expr -is [System.Management.Automation.Language.HashtableAst]) '$script:Catalog 的右側不是 hashtable 字面，拒絕求值'
+    $catalog = & ([scriptblock]::Create($rhs.Extent.Text))
+    Assert ($catalog.Keys.Count -gt 0) '變異目錄是空的'
+
+    # 未設定的欄位是 $null，而 @($null) 的長度是 1；一元逗號則是避免單元素陣列被
+    # 攤平成純量。兩個陷阱與 mutate.ps1 的 ConvertTo-List 同一組。
+    $asList = {
+        param($Value)
+        if ($null -eq $Value) { return , @() }
+        return , @($Value | Where-Object { $null -ne $_ })
+    }
+    $countOf = {
+        param([string]$Text, [string]$Needle)
+        $c = 0; $i = 0
+        while (($i = $Text.IndexOf($Needle, $i, [System.StringComparison]::Ordinal)) -ge 0) {
+            $c++; $i += $Needle.Length
+        }
+        return $c
+    }
+
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $totalOld = 0
+
+    foreach ($name in $catalog.Keys) {
+        $m = $catalog[$name]
+        $olds = & $asList $m.Old
+        $news = & $asList $m.New
+        $files = & $asList $m.File
+
+        if ($olds.Count -eq 0) { $problems.Add("$name：沒有宣告任何 Old"); continue }
+        if ($olds.Count -ne $news.Count) {
+            $problems.Add(('{0}：Old {1} 個、New {2} 個，數量不一致' -f $name, $olds.Count, $news.Count)); continue
+        }
+        if ($files.Count -eq 1) { $files = @($olds | ForEach-Object { $files[0] }) }
+        if ($files.Count -ne $olds.Count) {
+            $problems.Add(('{0}：File 既不是單一檔案，數量也對不上 Old/New（File {1} 個、Old {2} 個）' -f $name, $files.Count, $olds.Count)); continue
+        }
+
+        # 依檔案分組但保留對的原始順序：累進替換是以檔案為單位進行的。
+        $byFile = [ordered]@{}
+        for ($i = 0; $i -lt $olds.Count; $i++) {
+            $p = Join-Path $script:RepoRoot $files[$i]
+            if (-not $byFile.Contains($p)) { $byFile[$p] = [System.Collections.Generic.List[object]]::new() }
+            [void]$byFile[$p].Add([pscustomobject]@{ Old = [string]$olds[$i]; New = [string]$news[$i]; Idx = $i + 1 })
+        }
+
+        foreach ($path in @($byFile.Keys)) {
+            if (-not [System.IO.File]::Exists($path)) {
+                $problems.Add(('{0}：找不到目標檔案 {1}' -f $name, $path)); continue
+            }
+            $leaf = Split-Path -Leaf $path
+            $orig = [System.IO.File]::ReadAllText($path)
+            $cur = $orig
+            foreach ($pair in $byFile[$path]) {
+                $totalOld++
+                if ([string]::IsNullOrEmpty($pair.Old)) {
+                    $problems.Add(('{0} #{1}：Old 是空字串' -f $name, $pair.Idx)); continue
+                }
+                if ($pair.Old -ceq $pair.New) {
+                    $problems.Add(('{0} #{1}：Old 與 New 完全相同，這一對等於什麼都沒植入' -f $name, $pair.Idx)); continue
+                }
+                $hits = & $countOf $cur $pair.Old
+                if ($hits -ne 1) {
+                    $problems.Add(('{0} #{1}：Old 在 {2} 命中 {3} 次（必須恰好 1 次）：{4}' -f `
+                                $name, $pair.Idx, $leaf, $hits, (Squash $pair.Old 90)))
+                    continue
+                }
+                if (-not [string]::IsNullOrEmpty($pair.New)) {
+                    $pre = & $countOf $orig $pair.New
+                    if ($pre -ne 0) {
+                        $problems.Add(('{0} #{1}：New 在 {2} 的原始內容裡已經出現 {3} 次（必須 0 次，植入的內容要是真正的新內容）：{4}' -f `
+                                    $name, $pair.Idx, $leaf, $pre, (Squash $pair.New 90)))
+                    }
+                }
+                $cur = $cur.Replace($pair.Old, $pair.New)
+            }
+            if ($cur -ceq $orig) {
+                $problems.Add(('{0}：套完所有替換後 {1} 的內容完全沒變，這一項等於什麼都沒植入' -f $name, $leaf))
+            }
+        }
+    }
+
+    Assert ($problems.Count -eq 0) ("變異目錄與產品程式碼不同步（改文案或改程式時必須同步更新 mutate.ps1）：`n  " + ($problems -join "`n  "))
+    return ('{0} 項變異、{1} 個 Old 片段：逐對累進比對後每個都恰好命中一次，對應的 New 皆尚未存在，且每一項都確實改變了目標檔案' -f $catalog.Count, $totalOld)
+}
+
 Write-Host ''
 Write-Host '-- Roundtrip --' -ForegroundColor Cyan
 
@@ -2525,7 +2728,7 @@ Invoke-TCase 'C42' 'wildcard 命中子目錄：須出聲警告，且解包後不
     Assert (@($files.Keys | Where-Object { $_ -match '(^|/)top\.txt$' }).Count -eq 1) ('top.txt 未正確還原：' + (($files.Keys) -join ','))
     Assert (-not ($files.Keys | Where-Object { $_ -match 'inside\.txt' })) '違反不遞迴：子目錄內的檔案被打包了'
     Assert ($dirs.Count -eq 0) ('解包後留下空目錄（不遞迴就不該產生目錄項目）：' + (($dirs | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
-    $warn = ($p.All -split "`r?`n" | Where-Object { $_ -match 'WARNING|警告|略過|跳過' } | Select-Object -First 1)
+    $warn = ($p.All -split "`r?`n" | Where-Object { $_ -match (Get-MsgPattern 'wildcard.skipdir') } | Select-Object -First 1)
     return ('已警告且只還原 top.txt、無空目錄；warn=' + (Squash $warn 70))
 }
 
@@ -3161,7 +3364,7 @@ $e = Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_
     Assert (-not [System.IO.File]::Exists($sb.PubPath)) "-WhatIf 竟產生了公鑰：$($sb.PubPath)"
     Assert (-not [System.IO.File]::Exists($outKey)) "-WhatIf 竟產生了匯出檔：$outKey"
     Assert (-not [System.IO.Directory]::Exists((Join-Path $sb.Path '.rune'))) '-WhatIf 竟建立了 .rune 資料夾'
-    $whatIfLines = @(($r.StdOut -split "`r?`n") | Where-Object { $_ -match 'What if|如果' }).Count
+    $whatIfLines = @(($r.StdOut -split "`r?`n") | Where-Object { $_ -match (Get-MsgPattern 'whatif.line') }).Count
     Assert ($whatIfLines -ge 2) ('兩條路徑應各印一行 What if 說明，實得 {0} 行：{1}' -f $whatIfLines, (Squash $r.StdOut 200))
     return ('兩條破壞性路徑帶 -WhatIf：皆未回傳結果物件、沙箱沒有 .rune、沒有匯出檔，並各印出一行預演說明')
 }
@@ -3325,6 +3528,16 @@ Write-Host $summary -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 $expectedRun = if ($script:RunTier -eq 'Core') { $coreCount } else { $script:Registered.Count }
 if (-not $Filter -and $script:Results.Count -ne $expectedRun) {
     Write-Host ('警告：本層級應執行 {0} 案，實際只執行 {1} 案' -f $expectedRun, $script:Results.Count) -ForegroundColor Red
+}
+# SKIP 一律醒目列出案號與理由。SKIP 本來就該罕見，而「被靜默略過的斷言」與「通過的
+# 斷言」在只看退出碼的地方長得一模一樣——P7 因殘留旗標而永久 SKIP 就是這個形狀。
+# 退出碼刻意不因 SKIP 而改變：有些 SKIP 是環境限制的合理結果（例如 C49 建不出夠深
+# 的路徑），把它們一律變成失敗只會逼人去關掉這個提示。
+if ($skip) {
+    Write-Host ('注意：本次有 {0} 案 SKIP，未被驗證——SKIP 應屬罕見，請逐案確認是預期的環境限制：' -f $skip) -ForegroundColor Yellow
+    $script:Results | Where-Object Result -EQ 'SKIP' | ForEach-Object {
+        Write-Host ('  - {0}  {1}' -f $_.No, (Squash $_.Evidence 150)) -ForegroundColor Yellow
+    }
 }
 Write-Host ('工作目錄：{0}' -f $script:Work)
 

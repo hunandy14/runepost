@@ -32,13 +32,13 @@
     }
     catch {
         $ecdh.Dispose()
-        throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"
+        throw "The recipient public key PEM is not valid and cannot be loaded: $($_.Exception.Message)"
     }
 
     $curveOid = $ecdh.ExportParameters($false).Curve.Oid.Value
     if ($curveOid -ne $Script:P256CurveOid) {
         $ecdh.Dispose()
-        throw "公鑰不是 P-256：曲線 OID 為 $curveOid，本工具僅支援 P-256（$($Script:P256CurveOid)）"
+        throw "The recipient public key is not P-256: the curve OID is $curveOid. This tool supports P-256 ($($Script:P256CurveOid)) only."
     }
 
     return $ecdh

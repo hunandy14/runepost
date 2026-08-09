@@ -33,12 +33,12 @@ function Get-RunePrivateKey {
     }
 
     if (-not (Test-Path -LiteralPath $KeyFilePath -PathType Leaf)) {
-        throw "私鑰檔案讀取失敗：找不到 $KeyFilePath（請確認路徑，或先以 -GenerateKeys 產生金鑰）"
+        throw "Cannot find the private key: $KeyFilePath.`nVerify that the path is correct, or run 'rune-open.ps1 -GenerateKeys' to create a key pair."
     }
 
     $fileBytes = [System.IO.File]::ReadAllBytes($KeyFilePath)
     if ($fileBytes.Length -eq 0) {
-        throw "私鑰檔案讀取失敗：$KeyFilePath 是空檔案（0 位元組），沒有任何金鑰內容可讀"
+        throw "Cannot read the private key: $KeyFilePath is an empty file (0 bytes) and holds no key material."
     }
     $format = Get-RunePrivateKeyFormat -Content $fileBytes
 
@@ -51,18 +51,18 @@ function Get-RunePrivateKey {
                     $ecdh.ImportFromPem($pem)
                 }
                 catch {
-                    throw "私鑰檔案讀取失敗：未加密的 PKCS#8 PEM 內容無效（$($_.Exception.Message)）"
+                    throw "Cannot read the private key: the unencrypted PKCS#8 PEM content is not valid. $($_.Exception.Message)"
                 }
             }
             'Passphrase' {
                 $pem = [System.Text.Encoding]::UTF8.GetString($fileBytes)
                 $secret = Read-RunePassphrase -Passphrase $Passphrase -NoPrompt:$NoPrompt `
-                    -Prompt "請輸入 $KeyFilePath 的密碼"
+                    -Prompt "Enter the passphrase for $KeyFilePath"
                 try {
                     $ecdh.ImportFromEncryptedPem($pem, (ConvertFrom-RuneSecureString -Secure $secret))
                 }
                 catch {
-                    throw "私鑰檔案讀取失敗：無法以提供的密碼解開密碼保護的 PKCS#8 PEM（密碼可能不正確，或檔案已損壞）"
+                    throw "Cannot read the private key: the supplied passphrase did not open the passphrase-protected PKCS#8 PEM. The passphrase may be incorrect, or the file may be corrupted."
                 }
             }
             default {
@@ -73,7 +73,7 @@ function Get-RunePrivateKey {
                             $fileBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
                     }
                     catch {
-                        throw "私鑰讀不到／DPAPI 解保護失敗（是否為非本機、非本 Windows 帳號產生的私鑰檔，或檔案已損壞？）：$($_.Exception.Message)"
+                        throw "Cannot read the private key: DPAPI unprotect failed. The file may have been created on another machine or under another Windows account, or it may be corrupted. $($_.Exception.Message)"
                     }
 
                     $bytesRead = 0
@@ -81,7 +81,7 @@ function Get-RunePrivateKey {
                         $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead)
                     }
                     catch {
-                        throw "私鑰讀不到／DPAPI 解保護失敗：DPAPI 解密後的私鑰內容格式無效（$($_.Exception.Message)）"
+                        throw "Cannot read the private key: the content decrypted by DPAPI is not a valid private key. $($_.Exception.Message)"
                     }
                 }
                 finally {
@@ -94,7 +94,7 @@ function Get-RunePrivateKey {
 
         $curveOid = $ecdh.ExportParameters($false).Curve.Oid.Value
         if ($curveOid -ne $Script:P256CurveOid) {
-            throw "私鑰不是 P-256：曲線 OID 為 $curveOid，本工具僅支援 P-256（$($Script:P256CurveOid)）"
+            throw "The private key is not P-256: the curve OID is $curveOid. This tool supports P-256 ($($Script:P256CurveOid)) only."
         }
     }
     catch {

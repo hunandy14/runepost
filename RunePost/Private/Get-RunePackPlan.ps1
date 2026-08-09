@@ -14,7 +14,7 @@ function Get-RunePackPlan {
         #     略過並警告，不遞迴打包，也不把目錄當成空 entry 塞進封存包。
         $items = @(Get-Item -Path $PackPath -ErrorAction SilentlyContinue)
         if ($items.Count -eq 0) {
-            throw "找不到符合萬用字元的項目：$PackPath"
+            throw "Cannot find any item matching the wildcard: $PackPath."
         }
         $parent = Split-Path -Path $PackPath -Parent
         if ([string]::IsNullOrEmpty($parent)) {
@@ -25,13 +25,13 @@ function Get-RunePackPlan {
         }
         $fileItems = @(foreach ($item in $items) {
             if ($item.PSIsContainer) {
-                Write-Warning "wildcard 不遞迴，已略過目錄：$($item.Name)"
+                Write-Warning "Wildcard matching is not recursive. Skipped the directory: $($item.Name)"
                 continue
             }
             $item
         })
         if ($fileItems.Count -eq 0) {
-            throw "找不到符合萬用字元的項目：$PackPath（僅匹配到目錄，wildcard 不遞迴打包目錄）"
+            throw "Cannot find any file matching the wildcard: $PackPath. Only directories matched, and wildcard matching does not pack directories recursively."
         }
         $entries = foreach ($item in $fileItems) {
             [pscustomobject]@{
@@ -51,7 +51,7 @@ function Get-RunePackPlan {
         $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)
         $allDirs = @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force)
         if ($files.Count -eq 0 -and $allDirs.Count -eq 0) {
-            throw "資料夾內沒有可打包的檔案：$PackPath"
+            throw "The folder contains no file to pack: $PackPath."
         }
         $fileEntries = foreach ($f in $files) {
             $rel = $f.FullName.Substring($root.Length + 1) -replace '\\', '/'
@@ -92,6 +92,6 @@ function Get-RunePackPlan {
         }
     }
     else {
-        throw "找不到指定的路徑：$PackPath"
+        throw "Cannot find the specified path: $PackPath."
     }
 }

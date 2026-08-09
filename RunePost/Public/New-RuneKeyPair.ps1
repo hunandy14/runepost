@@ -54,16 +54,16 @@
     # 呼叫確認會擲回例外而不是卡住，但那依賴 host 正確回報自己不可互動，沒有跨版本
     # 保證；標準輸入被重新導向時一律主動拒絕，並指出 -Force 這條出路。
     if ($keyExists -and $willConfirm -and [Console]::IsInputRedirected) {
-        throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n非互動環境無法提示確認，請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"
+        throw "The private key already exists: $($Script:DefaultKeyFile).`nThis is a non-interactive session, so the confirmation prompt cannot be displayed.`nSpecify -Force to create a new key pair. The existing key pair is renamed to .bak files and kept, not deleted.`nAlternatively, move private.key aside and run the command again."
     }
 
     $action = if ($keyExists) {
-        "產生新的 ECDH P-256 金鑰對，既有金鑰改名保留為 $($backupPlan.KeyBackup)"
+        "Create a new ECDH P-256 key pair and rename the existing key pair to $($backupPlan.KeyBackup)"
     }
     else {
-        "產生 ECDH P-256 金鑰對：$($Script:DefaultKeyFile)"
+        "Create an ECDH P-256 key pair: $($Script:DefaultKeyFile)"
     }
-    $caption = if ($keyExists) { "$($Script:DefaultKeyFile) 已存在" } else { '產生 ECDH P-256 金鑰對' }
+    $caption = if ($keyExists) { "$($Script:DefaultKeyFile) already exists" } else { 'Create an ECDH P-256 key pair' }
     # 提示內文要讀出既有私鑰才能算指紋，只有真的要問的時候才付這個代價。
     $query = if ($keyExists -and $willConfirm) { Get-RuneKeyOverwritePrompt -BackupPlan $backupPlan } else { $action }
     if (-not $PSCmdlet.ShouldProcess($action, $query, $caption)) {
@@ -77,7 +77,7 @@
     $keyPassphrase = $null
     if ($Protect -eq 'Passphrase') {
         $keyPassphrase = Read-RunePassphrase -Passphrase $Passphrase -ConfirmEntry `
-            -Prompt '請輸入用於保護私鑰的密碼'
+            -Prompt 'Enter the passphrase that will protect the private key'
     }
 
     if ($keyExists) {
