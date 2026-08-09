@@ -12,7 +12,7 @@
     try {
         $path = if ([string]::IsNullOrWhiteSpace($KeyFilePath)) { $Script:DefaultKeyFile } else { $KeyFilePath }
         if ((Get-RunePrivateKeyFormat -Content ([System.IO.File]::ReadAllBytes($path))) -eq 'Passphrase') {
-            return '無法顯示（私鑰以密碼保護）'
+            return 'Not shown (the private key is passphrase-protected)'
         }
 
         $ecdh = Get-RunePrivateKey -KeyFilePath $KeyFilePath -NoPrompt

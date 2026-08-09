@@ -25,33 +25,33 @@
 
     if ($Passphrase) {
         if ($Passphrase.Length -eq 0) {
-            throw "私鑰密碼無效：$ParameterName 為空字串，密碼不得為空。"
+            throw "The passphrase is not valid: $ParameterName is an empty string. The passphrase cannot be empty."
         }
         return $Passphrase
     }
 
     if ($NoPrompt) {
-        throw "私鑰載入失敗：私鑰以密碼保護，但未提供密碼，且目前的流程不顯示密碼提示。`n請以 $ParameterName 傳入密碼。"
+        throw "Cannot load the private key: the key is passphrase-protected, no passphrase was supplied, and this operation does not display a passphrase prompt.`nSupply the passphrase with $ParameterName."
     }
 
     if ([Console]::IsInputRedirected) {
-        throw "私鑰密碼未提供：目前為非互動環境（標準輸入已重新導向），無法顯示密碼提示。`n請以 $ParameterName 傳入 SecureString，例如 $ParameterName (Read-Host -AsSecureString)。"
+        throw "No passphrase was supplied for the private key. This is a non-interactive session (standard input is redirected), so the passphrase prompt cannot be displayed.`nPass a SecureString with $ParameterName, for example $ParameterName (Read-Host -AsSecureString)."
     }
 
     $first = Read-Host -Prompt $Prompt -AsSecureString
     if (-not $first -or $first.Length -eq 0) {
-        throw '私鑰密碼無效：未輸入任何字元，密碼不得為空。'
+        throw 'The passphrase is not valid: no characters were entered. The passphrase cannot be empty.'
     }
 
     if ($ConfirmEntry) {
-        $second = Read-Host -Prompt '請再次輸入密碼以確認' -AsSecureString
+        $second = Read-Host -Prompt 'Enter the passphrase again to confirm' -AsSecureString
         $a = ConvertFrom-RuneSecureString -Secure $first
         $b = ConvertFrom-RuneSecureString -Secure $second
         $same = [string]::Equals($a, $b, [System.StringComparison]::Ordinal)
         # 比對結束就放掉這兩份明文，不讓它們活到函式結束
         $a = $null; $b = $null
         if (-not $same) {
-            throw '私鑰密碼無效：兩次輸入的密碼不一致，未變更任何檔案。'
+            throw 'The passphrase is not valid: the two entries do not match. No files were changed.'
         }
     }
 

@@ -12,17 +12,17 @@ function ConvertFrom-RuneContainer {
 
     $headerMin = 4 + 1 + 1 + 2
     if ($Bytes.Length -lt $headerMin) {
-        throw '容器格式錯誤：檔頭長度不足，檔案可能已損壞或被截斷'
+        throw 'The container format is not valid: the header is shorter than the minimum length. The file may be corrupted or truncated.'
     }
 
     $magic = [System.Text.Encoding]::ASCII.GetString($Bytes, 0, 4)
     if ($magic -ne $Script:RuneMagic) {
-        throw "容器格式錯誤：檔頭 magic 不符（讀到 '$magic'），此檔案可能不是本工具產生的密文"
+        throw "The container format is not valid: the header magic does not match (read '$magic'). The file was probably not produced by this tool."
     }
 
     $version = $Bytes[4]
     if ($version -ne $Script:RuneVersion) {
-        throw "版本不符：檔案版本為 $version，本程式僅支援版本 $($Script:RuneVersion)"
+        throw "The container version does not match: the file is version $version. This tool supports version $($Script:RuneVersion) only."
     }
 
     $contentType = $Bytes[5]
@@ -33,7 +33,7 @@ function ConvertFrom-RuneContainer {
     $offset = 8
     $minTotal = $offset + $ephPubKeyLen + $Script:NonceLength + $Script:TagLength
     if ($Bytes.Length -lt $minTotal) {
-        throw '容器格式錯誤：長度不足以包含完整的 ephemeral 公鑰／nonce／tag，檔案可能已損壞或被截斷'
+        throw 'The container format is not valid: the length is too short to hold the complete ephemeral public key, nonce, and tag. The file may be corrupted or truncated.'
     }
 
     $ephPubKey = Get-ByteRange -Source $Bytes -Offset $offset -Length $ephPubKeyLen

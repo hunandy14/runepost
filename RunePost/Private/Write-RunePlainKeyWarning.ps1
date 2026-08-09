@@ -8,7 +8,7 @@
     #>
     param([string] $KeyFilePath)
 
-    Write-Warning "私鑰以未加密的 PKCS#8 PEM 儲存於 $KeyFilePath。"
-    Write-Warning '任何能讀取此檔案的人，都能解開所有以對應公鑰加密的密文。'
-    Write-Warning '請勿將此檔案置於雲端同步資料夾或版本控管目錄。'
+    Write-Warning "The private key is stored as an unencrypted PKCS#8 PEM at $KeyFilePath."
+    Write-Warning 'Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.'
+    Write-Warning 'Do not place this file in a cloud-sync folder or a version-control directory.'
 }

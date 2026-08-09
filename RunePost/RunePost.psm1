@@ -126,7 +126,7 @@ foreach ($file in @($Private) + @($Public)) {
         . $file.FullName
     }
     catch {
-        throw "載入模組檔案失敗：$($file.FullName)（$($_.Exception.Message)）"
+        throw "Cannot load the module file: $($file.FullName). $($_.Exception.Message)"
     }
 }
 

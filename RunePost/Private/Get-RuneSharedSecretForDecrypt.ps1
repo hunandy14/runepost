@@ -15,13 +15,13 @@ function Get-RuneSharedSecretForDecrypt {
             $ephPub.ImportSubjectPublicKeyInfo($EphPubKeyDer, [ref] $bytesRead)
         }
         catch {
-            throw "容器內的 ephemeral 公鑰格式無效：$($_.Exception.Message)"
+            throw "The ephemeral public key in the container is not valid: $($_.Exception.Message)"
         }
         try {
             return $OwnPrivateKey.DeriveRawSecretAgreement($ephPub.PublicKey)
         }
         catch {
-            throw "ECDH 金鑰交換失敗：私鑰與加密所用的公鑰不匹配，或私鑰檔案已損壞（$($_.Exception.Message)）"
+            throw "The ECDH key agreement failed: the private key does not match the public key used for encryption, or the private key file is corrupted. $($_.Exception.Message)"
         }
     }
     finally {

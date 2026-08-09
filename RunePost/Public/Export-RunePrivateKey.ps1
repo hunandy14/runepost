@@ -41,26 +41,26 @@
     )
 
     if ($Protect -eq 'Dpapi') {
-        throw "私鑰匯出失敗：-ExportPrivateKey 不支援 -Protect Dpapi。`nDPAPI 綁定本機與本 Windows 帳號，產生的檔案在其他機器或帳號無法還原，不具備份用途。`n請改用 -Protect None 或 -Protect Passphrase。"
+        throw "Cannot export the private key: -ExportPrivateKey does not support -Protect Dpapi.`nDPAPI binds the file to this machine and this Windows account, so the exported file cannot be read on another machine or account and does not serve as a backup.`nUse -Protect None or -Protect Passphrase instead."
     }
 
     if ([string]::IsNullOrWhiteSpace($OutFilePath)) {
-        throw '私鑰匯出失敗：-OutFile 未指定輸出路徑。'
+        throw 'Cannot export the private key: -OutFile does not specify an output path.'
     }
     $outFull = [System.IO.Path]::GetFullPath($OutFilePath)
 
     $sourcePath = if ([string]::IsNullOrWhiteSpace($KeyFilePath)) { $Script:DefaultKeyFile } else { $KeyFilePath }
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-        throw "私鑰檔案讀取失敗：找不到 $sourcePath（請確認路徑，或先以 -GenerateKeys 產生金鑰）"
+        throw "Cannot find the private key: $sourcePath.`nVerify that the path is correct, or run 'rune-open.ps1 -GenerateKeys' to create a key pair."
     }
 
     if ((Test-Path -LiteralPath $outFull) -and -not $Force) {
-        throw "輸出檔案已存在：$outFull（如需覆蓋請加上 -Force）"
+        throw "The output file already exists: $outFull.`nSpecify -Force to overwrite it."
     }
 
     $outDir = [System.IO.Path]::GetDirectoryName($outFull)
     if (-not (Test-Path -LiteralPath $outDir -PathType Container)) {
-        throw "私鑰匯出失敗：輸出路徑的資料夾不存在：$outDir"
+        throw "Cannot export the private key: the output folder does not exist: $outDir"
     }
 
     if (-not $PSBoundParameters.ContainsKey('Confirm')) {
@@ -76,15 +76,15 @@
     # 非互動防呆疊在 ShouldProcess 之外，理由同 New-RuneKeyPair：不依賴 host 是否
     # 正確回報自己不可互動，標準輸入被重新導向時一律主動拒絕。
     if ($willConfirm -and [Console]::IsInputRedirected) {
-        throw "私鑰匯出已中止：目前為非互動環境（標準輸入已重新導向），無法顯示確認提示。`n請加上 -Confirm:`$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。"
+        throw "Cannot export the private key: this is a non-interactive session (standard input is redirected), so the confirmation prompt cannot be displayed.`nSpecify -Confirm:`$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session."
     }
 
-    $action = "把 $sourcePath 匯出成 $(Get-RunePrivateKeyProtectNote -Protect $Protect)：$outFull"
+    $action = "Export $sourcePath as $(Get-RunePrivateKeyProtectNote -Protect $Protect): $outFull"
     $query = if ($willConfirm) {
         Get-RunePrivateKeyExportPrompt -SourceKeyPath $sourcePath -OutFilePath $outFull -Protect $Protect
     }
     else { $action }
-    if (-not $PSCmdlet.ShouldProcess($action, $query, '即將匯出私鑰')) {
+    if (-not $PSCmdlet.ShouldProcess($action, $query, 'Export the private key')) {
         return
     }
 
@@ -93,7 +93,7 @@
         $exportPassphrase = $null
         if ($Protect -eq 'Passphrase') {
             $exportPassphrase = Read-RunePassphrase -Passphrase $OutPassphrase -ConfirmEntry `
-                -ParameterName '-OutPassphrase' -Prompt '請輸入用於保護匯出檔的密碼'
+                -ParameterName '-OutPassphrase' -Prompt 'Enter the passphrase that will protect the exported file'
         }
 
         $privatePem = Export-RunePrivateKeyPem -Ecdh $ecdh -Protect $Protect -Passphrase $exportPassphrase

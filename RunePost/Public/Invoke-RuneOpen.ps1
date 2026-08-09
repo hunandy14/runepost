@@ -18,20 +18,20 @@ function Invoke-RuneOpen {
     )
 
     if (-not (Test-Path -LiteralPath $InFilePath -PathType Leaf)) {
-        throw "找不到輸入檔案：$InFilePath"
+        throw "Cannot find the input file: $InFilePath"
     }
 
     $rawText = [System.IO.File]::ReadAllText($InFilePath)
     $cleaned = ($rawText -replace '\s', '')
     if ([string]::IsNullOrEmpty($cleaned)) {
-        throw '輸入檔案內容為空，無法解析'
+        throw 'The input file is empty and cannot be parsed.'
     }
 
     try {
         $containerBytes = [Convert]::FromBase64String($cleaned)
     }
     catch {
-        throw "Base64 解碼失敗：檔案內容可能已損壞或被截斷（$($_.Exception.Message)）"
+        throw "Base64 decoding failed. The file content may be corrupted or truncated. $($_.Exception.Message)"
     }
 
     $parsed = ConvertFrom-RuneContainer -Bytes $containerBytes
@@ -64,10 +64,10 @@ function Invoke-RuneOpen {
         }
     }
     catch [System.Security.Cryptography.AuthenticationTagMismatchException] {
-        throw '內容驗證失敗（GCM 認證標籤不符）：檔案在傳輸過程中可能被竄改或損壞'
+        throw 'Content verification failed (the AES-GCM authentication tag does not match). The ciphertext may have been tampered with or corrupted in transit.'
     }
     catch {
-        throw "GCM 解密失敗：內容可能已損壞（$($_.Exception.Message)）"
+        throw "AES-GCM decryption failed. The content may be corrupted. $($_.Exception.Message)"
     }
 
     # 內容型別的合法性檢查必須在此——GCM 認證通過之後、解壓之前。
@@ -75,14 +75,14 @@ function Invoke-RuneOpen {
     # 才能斷定是本程式版本落後，而不是資料被竄改。若把這個檢查提前到解析階段，
     # 「位元被翻掉」會被誤報成「不支援的內容型別」，使用者就抓不到真正的問題。
     if ($parsed.ContentType -ne $Script:ContentTypeFileTree) {
-        throw ('本容器的內容型別 0x{0:X2} 由較新版本的 Rune 產生，請更新 rune-open.ps1' -f $parsed.ContentType)
+        throw ('The content type 0x{0:X2} in this container was produced by a newer version of Rune. Update rune-open.ps1.' -f $parsed.ContentType)
     }
 
     try {
         $zipBytes = Expand-RuneBrotli -InputBytes $plain
     }
     catch {
-        throw "Brotli 解壓縮失敗：資料可能已損壞（$($_.Exception.Message)）"
+        throw "Brotli decompression failed. The data may be corrupted. $($_.Exception.Message)"
     }
 
     # 先解到 Destination 底下的暫存資料夾，全部成功後才搬到正式位置；
@@ -99,7 +99,7 @@ function Invoke-RuneOpen {
             throw
         }
         catch {
-            throw "ZIP 解包失敗：封裝格式錯誤或已損壞（$($_.Exception.Message)）"
+            throw "ZIP extraction failed. The archive format is not valid, or the archive is corrupted. $($_.Exception.Message)"
         }
 
         # 還原檔數在搬移前於暫存資料夾清點：搬移後 Destination 可能本來就有其他
@@ -110,7 +110,7 @@ function Invoke-RuneOpen {
             Move-RuneExtractedTree -SourceDir $tmpDir -DestDir $DestinationPath
         }
         catch {
-            throw "解包結果搬移失敗：無法將暫存資料夾內容搬到 $DestinationPath（$($_.Exception.Message)）"
+            throw "Cannot move the extracted content from the temporary folder to $DestinationPath. $($_.Exception.Message)"
         }
     }
     finally {

@@ -26,12 +26,12 @@ function Invoke-RuneSeal {
     $staticPub = Get-RunePublicKey -PublicKeyRef $PublicKeyRef
     $recipientSpki = $staticPub.ExportSubjectPublicKeyInfo()
     $recipientFingerprint = Get-RuneKeyFingerprint -SpkiDer $recipientSpki
-    Write-Information ('收件人公鑰指紋：RUNE-KEY {0}' -f $recipientFingerprint)
-    Write-Information '（請與解密端 -GenerateKeys / -ExportPublicKey 印出的指紋逐字比對；不符代表公鑰可能已被掉包）'
+    Write-Information ('Recipient public key fingerprint: RUNE-KEY {0}' -f $recipientFingerprint)
+    Write-Information 'Compare it character by character with the fingerprint printed by -GenerateKeys or -ExportPublicKey on the decrypting machine. A mismatch means the public key may have been replaced.'
 
     $plan = Get-RunePackPlan -PackPath $PackPath
     if (-not $plan.Entries -or $plan.Entries.Count -eq 0) {
-        throw "沒有可打包的項目（路徑或萬用字元未匹配到任何檔案）：$PackPath"
+        throw "There is nothing to pack. The path or wildcard matched no file: $PackPath"
     }
 
     if ([string]::IsNullOrWhiteSpace($OutFilePath)) {
@@ -42,18 +42,18 @@ function Invoke-RuneSeal {
     }
 
     if ((Test-Path -LiteralPath $OutFilePath) -and -not $ForceOverwrite) {
-        throw "輸出檔案已存在：$OutFilePath（如需覆蓋請加上 -Force）"
+        throw "The output file already exists: $OutFilePath.`nSpecify -Force to overwrite it."
     }
 
-    Write-Information "打包中：共 $($plan.Entries.Count) 個項目..."
+    Write-Information "Packing $($plan.Entries.Count) items..."
     $zipBytes = New-RuneZipBytes -Entries $plan.Entries
     $originalSize = $zipBytes.Length
 
-    Write-Information '壓縮中（Brotli, SmallestSize）...'
+    Write-Information 'Compressing (Brotli, SmallestSize)...'
     $compressed = Compress-RuneBrotli -InputBytes $zipBytes
     $compressedSize = $compressed.Length
 
-    Write-Information '加密中（ECDH P-256 + HKDF-SHA256 + AES-256-GCM）...'
+    Write-Information 'Encrypting (ECDH P-256 + HKDF-SHA256 + AES-256-GCM)...'
     $ephemeral = New-RuneEcdhKeyPair
     $sharedSecret = $null
     $aesKey = $null

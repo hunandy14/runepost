@@ -3,7 +3,7 @@
     ModuleVersion     = '1.0.0'
     GUID              = '1e616c47-1ddf-42b5-942d-e0965cdbc735'
     Author            = 'Charlotte.Hong'
-    Description       = '密文傳輸工具（runepost）：兩台自有 Windows 機器間，經公開純文字管道（論壇／pastebin）單向傳檔。ECDH P-256 + HKDF-SHA256 + AES-256-GCM，純 .NET 內建類別實作，零外部依賴。'
+    Description       = 'runepost: sends files one way between two Windows machines you own, over a public plain-text channel such as a forum post or a pastebin. ECDH P-256 + HKDF-SHA256 + AES-256-GCM, built on the .NET base class library with no external dependencies.'
     PowerShellVersion = '7.4'
 
     # 明確清單，絕不用 '*'：萬用字元會讓模組自動載入器為了做命令探索而解析整個
