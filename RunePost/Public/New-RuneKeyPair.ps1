@@ -54,7 +54,7 @@
     # 呼叫確認會擲回例外而不是卡住，但那依賴 host 正確回報自己不可互動，沒有跨版本
     # 保證；標準輸入被重新導向時一律主動拒絕，並指出 -Force 這條出路。
     if ($keyExists -and $willConfirm -and [Console]::IsInputRedirected) {
-        throw "The private key already exists: $($Script:DefaultKeyFile)`nThis is a non-interactive session, so the confirmation prompt cannot be displayed. Specify -Force to create a new key pair (the existing key pair is renamed and kept, not deleted), or move the existing file aside and run the command again."
+        throw "The private key already exists: $($Script:DefaultKeyFile).`nThis is a non-interactive session, so the confirmation prompt cannot be displayed.`nSpecify -Force to create a new key pair. The existing key pair is renamed to .bak files and kept, not deleted.`nAlternatively, move private.key aside and run the command again."
     }
 
     $action = if ($keyExists) {

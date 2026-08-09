@@ -18,7 +18,7 @@ function Invoke-RuneOpen {
     )
 
     if (-not (Test-Path -LiteralPath $InFilePath -PathType Leaf)) {
-        throw "Cannot find the input file: $InFilePath"
+        throw "Cannot find the input file: $InFilePath."
     }
 
     $rawText = [System.IO.File]::ReadAllText($InFilePath)

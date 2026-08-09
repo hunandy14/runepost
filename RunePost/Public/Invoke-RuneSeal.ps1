@@ -31,7 +31,7 @@ function Invoke-RuneSeal {
 
     $plan = Get-RunePackPlan -PackPath $PackPath
     if (-not $plan.Entries -or $plan.Entries.Count -eq 0) {
-        throw "There is nothing to pack. The path or wildcard matched no file: $PackPath"
+        throw "There is nothing to pack. The path or wildcard matched no file: $PackPath."
     }
 
     if ([string]::IsNullOrWhiteSpace($OutFilePath)) {

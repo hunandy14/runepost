@@ -83,7 +83,7 @@ pwsh .\rune-open.ps1 -GenerateKeys
 Created an ECDH P-256 key pair. Private key protection: unencrypted PKCS#8 PEM.
   Private key  C:\Users\alice\.rune\private.key   (unencrypted PKCS#8 PEM)
   Public key   C:\Users\alice\.rune\public.pem
-  Fingerprint  RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+  Fingerprint  RUNE-KEY 68E8-91EC-0EBD-C2C2-FA19-6D9E-BC99-A472
 WARNING: The private key is stored as an unencrypted PKCS#8 PEM at C:\Users\alice\.rune\private.key.
 WARNING: Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.
 WARNING: Do not place this file in a cloud-sync folder or a version-control directory.
@@ -113,7 +113,7 @@ pwsh .\rune-seal.ps1 C:\data\report
 ```
 
 ```
-Recipient public key fingerprint: RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+Recipient public key fingerprint: RUNE-KEY 68E8-91EC-0EBD-C2C2-FA19-6D9E-BC99-A472
 Compare it character by character with the fingerprint printed by -GenerateKeys or -ExportPublicKey on the decrypting machine. A mismatch means the public key may have been replaced.
 Packing 2 items...
 Compressing (Brotli, SmallestSize)...
@@ -121,7 +121,7 @@ Encrypting (ECDH P-256 + HKDF-SHA256 + AES-256-GCM)...
 
 Done: C:\work\report.txt
 Packed, before compression : 261 bytes
-Compressed with Brotli     : 133 bytes
+Compressed with Brotli     : 134 bytes
 Base64 output file         : 356 bytes
 ```
 
@@ -137,8 +137,8 @@ Base64 output file         : 356 bytes
 `report.txt` 的內容就是純 Base64，每 76 字元換行：
 
 ```
-UlVORQIBWwAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQRh6QjHOiLdCkAO4h242JvQiybfOEf
-zP0BmrwSCVLyqEHYS0mfb615Rz7OYMMvTZDsAZigKCF1hTj5ofNopgac0MO1f5wjMb/IN3Omb/g2
+UlVORQIBWwAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQEy6GkQ1PmEvRAGPBYZpsjFP76Ti5l
+gWmTJczUSl+qPld5smHmzvITpGqeIyh4KdCHOmXaL2QXPK63elfiRc6JudZ+0dr9LGSaFx/WTh+6
 ...
 ```
 
@@ -152,7 +152,7 @@ pwsh .\rune-open.ps1 -Unpack report.txt -Destination C:\out\restored
 ```
 
 ```
-Decryption complete. Files were restored to: C:\out\restored
+Decryption complete. Files were restored to: C:\out\restored.
 ```
 
 `-Unpack` 與 `-Destination` 也可以省略參數名稱依序放位置：
@@ -202,7 +202,7 @@ pwsh .\rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem -Forc
 Exported the private key. Format: unencrypted PKCS#8 PEM.
   Source       C:\Users\alice\.rune\private.key
   Output       D:\backup\rune-private.pem
-  Fingerprint  RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+  Fingerprint  RUNE-KEY 68E8-91EC-0EBD-C2C2-FA19-6D9E-BC99-A472
 To decrypt with this backup: rune-open.ps1 -Unpack <ciphertext file> -Destination <destination folder> -KeyFile D:\backup\rune-private.pem
 WARNING: The private key is stored as an unencrypted PKCS#8 PEM at D:\backup\rune-private.pem.
 WARNING: Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.
@@ -233,7 +233,7 @@ pwsh .\rune-open.ps1 -ExportPublicKey
 Re-exported the public key.
   Private key  C:\Users\alice\.rune\private.key
   Public key   C:\Users\alice\.rune\public.pem
-  Fingerprint  RUNE-KEY A4D7-DEE4-C212-34E3-55FC-EFC0-ECD0-4397
+  Fingerprint  RUNE-KEY 68E8-91EC-0EBD-C2C2-FA19-6D9E-BC99-A472
 ```
 
 它同時是「再看一次我的指紋」的工具，隨時可以拿來與加密端核對。

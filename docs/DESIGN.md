@@ -579,8 +579,9 @@ P-256 曲線 OID、PBKDF2 迭代次數）寫在 `.psm1` 本體而不是 `Private
    不用 `Write-Error`，以避免 PowerShell 錯誤記錄框架附加的呼叫堆疊與分類等雜訊。
    寫出的是精簡訊息而不必然是單行：`WriteLine` 只呼叫一次，但訊息本身可以內嵌
    換行——「先陳述問題、再分行給補救動作」這條文案原則（§9）本來就會產生多行訊息，
-   例如非互動拒絕與「輸出檔已存在」是兩行、`-ExportPrivateKey -Protect Dpapi` 的
-   拒絕是三行、「找不到收件人公鑰」是三到四行。
+   例如「輸出檔已存在」與 `-Unpack` 的非互動密碼拒絕是兩行、
+   `-ExportPrivateKey -Protect Dpapi` 的拒絕是三行、「找不到收件人公鑰」與
+   `-GenerateKeys` 的非互動拒絕是四行。
 
 **模組一律回傳物件、不印字；呈現只發生在入口腳本這一層。** `Write-Host` 在入口腳本
 是正確的工具——訊息要無條件出現在畫面上，又不能混進任何回傳值；兩支腳本因此各自
@@ -916,7 +917,10 @@ pwsh -File .\tests\mutate.ps1 -Mutation M6 -Tier Full
 錯誤訊息的撰寫原則（**一律英文**，風格比照官方 PowerShell）：
 
 - **陳述句，句首大寫，句尾句點。** 不用驚嘆號、不用表情符號、不對使用者做價值判斷
-  （不寫 dangerous、never do this），要說後果就直接陳述後果。
+  （不寫 dangerous、never do this），要說後果就直接陳述後果。句點照打，即使該句
+  以路徑或檔名結尾；**唯一例外是整行結尾為一段可直接複製執行的命令列**（例如
+  `-ExportPrivateKey` 成功輸出的最後一行、覆蓋確認提示的救援指令），此時不加句點，
+  免得使用者把句點一併複製進命令。
 - **先陳述問題，再給補救動作。** 多個補救選項分行列出，不塞進同一句。常用句式：
   `Cannot find …`、`Cannot read …`、`Unable to …`、`… already exists.`、
   `Specify -Force to …`、`The … is not valid: …`。

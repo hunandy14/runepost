@@ -60,7 +60,7 @@
 
     $outDir = [System.IO.Path]::GetDirectoryName($outFull)
     if (-not (Test-Path -LiteralPath $outDir -PathType Container)) {
-        throw "Cannot export the private key: the output folder does not exist: $outDir"
+        throw "Cannot export the private key: the output folder does not exist: $outDir."
     }
 
     if (-not $PSBoundParameters.ContainsKey('Confirm')) {

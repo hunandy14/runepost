@@ -258,7 +258,7 @@ try {
         'ExportPublicKey' {
             $result = Export-RunePublicKey -KeyFilePath $KeyFile -Passphrase $Passphrase
             if (-not $result.IsDefaultKey) {
-                Write-Host "Used a non-default private key: $($result.KeyFile)"
+                Write-Host "Used a non-default private key: $($result.KeyFile)."
                 Write-Host "The public key was written to the same folder. $($result.DefaultPublicKeyFile) was not changed."
             }
             Show-RuneKeySummary -Title 'Re-exported the public key.' -KeyFilePath $result.KeyFile `
@@ -289,7 +289,7 @@ try {
         'Unpack' {
             $result = Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination `
                 -KeyFilePath $KeyFile -Passphrase $Passphrase
-            Write-Host "Decryption complete. Files were restored to: $($result.Destination)"
+            Write-Host "Decryption complete. Files were restored to: $($result.Destination)."
         }
     }
 }

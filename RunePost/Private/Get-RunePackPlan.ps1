@@ -14,7 +14,7 @@ function Get-RunePackPlan {
         #     略過並警告，不遞迴打包，也不把目錄當成空 entry 塞進封存包。
         $items = @(Get-Item -Path $PackPath -ErrorAction SilentlyContinue)
         if ($items.Count -eq 0) {
-            throw "Cannot find any item matching the wildcard: $PackPath"
+            throw "Cannot find any item matching the wildcard: $PackPath."
         }
         $parent = Split-Path -Path $PackPath -Parent
         if ([string]::IsNullOrEmpty($parent)) {
@@ -51,7 +51,7 @@ function Get-RunePackPlan {
         $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)
         $allDirs = @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force)
         if ($files.Count -eq 0 -and $allDirs.Count -eq 0) {
-            throw "The folder holds no file to pack: $PackPath"
+            throw "The folder contains no file to pack: $PackPath."
         }
         $fileEntries = foreach ($f in $files) {
             $rel = $f.FullName.Substring($root.Length + 1) -replace '\\', '/'
@@ -92,6 +92,6 @@ function Get-RunePackPlan {
         }
     }
     else {
-        throw "Cannot find the specified path: $PackPath"
+        throw "Cannot find the specified path: $PackPath."
     }
 }

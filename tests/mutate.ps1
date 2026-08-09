@@ -184,12 +184,12 @@ C08 的證據欄此時會多列出「salt=null」「salt=空位元組陣列」�
         Desc = '兩則路徑安全訊息退化成一般的封存格式錯誤'
         File = 'RunePost\Private\Expand-RuneZip.ps1'
         Old = @(
-            '"Unsafe archive path detected (the entry name contains a backslash): $($entry.FullName)")'
-            '"Unsafe archive path detected (the entry escapes the destination folder): $($entry.FullName)")'
+            '"Unsafe archive path detected (the entry name contains a backslash): $($entry.FullName).")'
+            '"Unsafe archive path detected (the entry escapes the destination folder): $($entry.FullName).")'
         )
         New = @(
-            '"Archive format error: $($entry.FullName)")   # MUTATION M7'
-            '"Archive format error: $($entry.FullName)")   # MUTATION M7'
+            '"Archive format error: $($entry.FullName).")   # MUTATION M7'
+            '"Archive format error: $($entry.FullName).")   # MUTATION M7'
         )
         MustRed = @('C37', 'C41', 'C46', 'C47')
         MayRed = @()
@@ -232,12 +232,12 @@ C08 的證據欄此時會多列出「salt=null」「salt=空位元組陣列」�
         Old = @(
             'throw "No passphrase was supplied for the private key. This is a non-interactive session (standard input is redirected), so the passphrase prompt cannot be displayed.`nPass a SecureString with $ParameterName, for example $ParameterName (Read-Host -AsSecureString)."'
             'throw "Cannot export the private key: this is a non-interactive session (standard input is redirected), so the confirmation prompt cannot be displayed.`nSpecify -Confirm:`$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session."'
-            'throw "The private key already exists: $($Script:DefaultKeyFile)`nThis is a non-interactive session, so the confirmation prompt cannot be displayed. Specify -Force to create a new key pair (the existing key pair is renamed and kept, not deleted), or move the existing file aside and run the command again."'
+            'throw "The private key already exists: $($Script:DefaultKeyFile).`nThis is a non-interactive session, so the confirmation prompt cannot be displayed.`nSpecify -Force to create a new key pair. The existing key pair is renamed to .bak files and kept, not deleted.`nAlternatively, move private.key aside and run the command again."'
         )
         New = @(
             'throw "No passphrase was supplied for the private key.`nPass a SecureString with $ParameterName, for example $ParameterName (Read-Host -AsSecureString)."   # MUTATION M12'
             'throw "Cannot export the private key.`nSpecify -Confirm:`$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session."   # MUTATION M12'
-            'throw "The private key already exists: $($Script:DefaultKeyFile)`nSpecify -Force to create a new key pair (the existing key pair is renamed and kept, not deleted), or move the existing file aside and run the command again."   # MUTATION M12'
+            'throw "The private key already exists: $($Script:DefaultKeyFile).`nSpecify -Force to create a new key pair. The existing key pair is renamed to .bak files and kept, not deleted.`nAlternatively, move private.key aside and run the command again."   # MUTATION M12'
         )
         MustRed = @('C73', 'C76', 'C79', 'C86', 'C87')
         MayRed = @()

@@ -23,7 +23,7 @@ function Expand-RuneZip {
                 #     含反斜線，就一定不是自家封裝，直接拒絕，不嘗試解讀成相對路徑。
                 if ($entry.FullName -match '\\') {
                     throw [System.Security.SecurityException]::new(
-                        "Unsafe archive path detected (the entry name contains a backslash): $($entry.FullName)")
+                        "Unsafe archive path detected (the entry name contains a backslash): $($entry.FullName).")
                 }
 
                 $relPath = $entry.FullName -replace '/', [System.IO.Path]::DirectorySeparatorChar
@@ -35,7 +35,7 @@ function Expand-RuneZip {
                 $fullResolved = [System.IO.Path]::GetFullPath($destPath)
                 if (-not $fullResolved.StartsWith($destRootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) {
                     throw [System.Security.SecurityException]::new(
-                        "Unsafe archive path detected (the entry escapes the destination folder): $($entry.FullName)")
+                        "Unsafe archive path detected (the entry escapes the destination folder): $($entry.FullName).")
                 }
 
                 if ($entry.FullName.EndsWith('/')) {
