@@ -85,6 +85,9 @@ if (-not (Test-Path -LiteralPath $script:Verify)) { throw "找不到驗收套件
 #   MustRed  這個缺陷一定要讓這些案號變紅；少一個就是斷言失效
 #   MayRed   連帶會紅的案號，允許但不強制
 #   MustInfo 這些案號必須變成 INFO（用於「測試端偵測到異常但無法斷言對錯」的情形）
+#   Tier     跑這一項所需的驗收層級，省略即 Core。MustRed 含 Full-only 案號的變異
+#            必須填 Full，否則那些案號根本不會執行，「沒紅」就不是斷言失效的證據。
+#            命令列的 -Tier Full 一律優先，會把所有變異都拉到 Full。
 #   Note     需要額外說明時填寫，會印在對照表下方
 # ==============================================================================
 
@@ -138,13 +141,13 @@ Expand-RuneZip 有兩道路徑檢查：(a) entry 名稱含反斜線一律拒絕�
         File = 'RunePost\Private\Get-RuneHkdfInfo.ps1'
         Old = "`$info[`$magicBytes.Length + 1] = `$ContentType"
         New = "`$info[`$magicBytes.Length + 1] = 0   # MUTATION M2"
-        MustRed = @('C52')
-        MayRed = @()
-        MustInfo = @('C08')
+        MustRed = @('C52', 'C08')
+        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54')
         Note = @'
 C52 變紅：contentType 被竄改後 tag 仍驗得過，錯誤退化成「由較新版本產生」。
-C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，代表測試端確實偵測
-到 KDF 參數不符。依賴 C08 還原結果偽造容器的案例會因此 SKIP，屬預期連鎖。
+C08 變紅：以 DESIGN §1.3.1 的規格參數派生出來的金鑰通不過 GCM 驗證 —— 這就是「實作
+的 KDF 參數與規格不符」的直接證據，不是「窮舉沒命中」這種模糊結論。獨立解密鏈與
+偽造容器兩組案例都靠同一份素材，因此由 fixture 的負向記憶統一指回 C08。
 '@
     }
 
@@ -154,11 +157,12 @@ C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，
         Old = "        [System.Security.Cryptography.RandomNumberGenerator]::Fill(`$nonce)"
         New = "        # MUTATION M3：不填隨機值，nonce 固定為全零"
         MustRed = @('C06')
-        MayRed = @('C54', 'C37', 'C41', 'C46', 'C47')
+        MayRed = @()
         Note = @'
-連帶紅的來源：nonce 同時是 HKDF 的 salt，全零時 HMAC 的零填充讓「salt = 12 個
-零位元組」與「salt = null」導出同一把金鑰，C08 的窮舉會鎖定 salt=null 這個別名，
-偽造容器機制隨之以錯誤的參數派生。
+只有 C06（一次性金鑰）該紅。偽造容器那一組（C54 / C37 / C41 / C46 / C47）維持綠色
+的理由：偽造一律以 DESIGN §1.3.1 的規格參數派生，nonce 是不是隨機的與參數選擇無關。
+C08 的證據欄此時會多列出「salt=null」「salt=空位元組陣列」兩個等價別名 —— nonce
+全為零時 HMAC 的零填充讓它們與 salt=nonce 導出同一把金鑰。這是附加資訊，不影響判定。
 '@
     }
 
@@ -189,6 +193,119 @@ C08 轉為 INFO：獨立解密鏈的候選窮舉再也對不上實作的 info，
 檢查本身完好，仍然拒絕、仍然不逸出，只有措辭退化。四案全紅代表訊息斷言確實有
 咬合力——「不安全的封存路徑」是獨立語意，不可以用「格式損壞」搪塞過去，否則
 使用者會把攻擊誤讀成檔案壞掉。
+'@
+    }
+
+    # ---- 「保留行為、只退化訊息」類別 ----
+    #
+    # M7 起的這一組都不動任何檢查：仍然拒絕、仍然不留下檔案、exit code 不變，只把
+    # 錯誤訊息的措辭退化成一句泛泛的失敗。它們把「訊息斷言」單獨隔離出來驗 —— 有
+    # 專屬語意要求的錯誤（曲線不符、非互動拒絕、空檔案、公鑰格式無效）若被一般錯誤
+    # 搪塞過去，使用者就無從判斷下一步該做什麼，而黑箱行為完全看不出差別。
+
+    M11 = @{
+        Desc = '曲線不符的訊息退化成一般的公鑰載入失敗'
+        File = 'RunePost\Private\Get-RunePublicKey.ps1'
+        Old = 'throw "公鑰不是 P-256：曲線 OID 為 $curveOid，本工具僅支援 P-256（$($Script:P256CurveOid)）"'
+        New = 'throw "公鑰載入失敗：OID 為 $curveOid"   # MUTATION M11'
+        MustRed = @('C45')
+        MayRed = @()
+        Note = @'
+公鑰仍然被拒、仍然不產生輸出檔，只是不再點名曲線。C45 變紅代表「須明確報曲線不符」
+這條斷言真的咬得動：使用者拿到 P-384 公鑰時要能知道該換一把 P-256，光說「載入失敗」
+會被誤讀成檔案壞掉。
+'@
+    }
+
+    M12 = @{
+        Desc = '三處「非互動環境」拒絕訊息退化成不提環境的一般錯誤'
+        File = @(
+            'RunePost\Private\Read-RunePassphrase.ps1'
+            'RunePost\Public\Export-RunePrivateKey.ps1'
+            'RunePost\Public\New-RuneKeyPair.ps1'
+        )
+        Old = @(
+            'throw "私鑰密碼未提供：目前為非互動環境（標準輸入已重新導向），無法顯示密碼提示。`n請以 $ParameterName 傳入 SecureString，例如 $ParameterName (Read-Host -AsSecureString)。"'
+            'throw "私鑰匯出已中止：目前為非互動環境（標準輸入已重新導向），無法顯示確認提示。`n請加上 -Confirm:`$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。"'
+            'throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n非互動環境無法提示確認，請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"'
+        )
+        New = @(
+            'throw "私鑰密碼未提供。`n請以 $ParameterName 傳入 SecureString，例如 $ParameterName (Read-Host -AsSecureString)。"   # MUTATION M12'
+            'throw "私鑰匯出已中止。`n請加上 -Confirm:`$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。"   # MUTATION M12'
+            'throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"   # MUTATION M12'
+        )
+        MustRed = @('C73', 'C76', 'C79', 'C86', 'C87')
+        MayRed = @()
+        Tier = 'Full'
+        Note = @'
+三處都照樣拒絕、照樣不產生檔案、照樣不卡在提示，出路指引（-Passphrase / -Force /
+-Confirm:$false）也原封不動，只有「目前為非互動環境」這句話沒了。
+Read-RunePassphrase 那一處讓 C73 與 C76 變紅（解密與匯出兩條要密碼的路徑各一次），
+Export-RunePrivateKey 那一處讓 C79、C86 與 C87(b) 變紅（非互動、-Force 不代表略過
+確認、呼叫端 ConfirmPreference=None 三種情境各一次）。
+New-RuneKeyPair 那一處則沒有對應的紅：C34 與 C87(a) 要求的是「已存在」這個環節加上
+-Force 這條出路，並未要求點名非互動——那是刻意的，因為同一個拒絕在互動環境下也
+成立，措辭不該綁死在環境上。
+'@
+    }
+
+    M13 = @{
+        Desc = '空私鑰檔的訊息退化成 DPAPI 解保護失敗'
+        File = 'RunePost\Private\Get-RunePrivateKey.ps1'
+        Old = 'throw "私鑰檔案讀取失敗：$KeyFilePath 是空檔案（0 位元組），沒有任何金鑰內容可讀"'
+        New = 'throw "私鑰檔案讀取失敗：$KeyFilePath 無法以 DPAPI 解保護"   # MUTATION M13'
+        MustRed = @('C83')
+        MayRed = @()
+        Tier = 'Full'
+        Note = @'
+0 位元組的私鑰檔仍然被擋下、仍然不寫出任何檔案，只是原因被說成 DPAPI 解保護失敗。
+這正是 C83 案名裡「不繞成 DPAPI 解保護失敗」要防的那件事：使用者會去查 DPAPI 與
+使用者設定檔，而真正的問題只是檔案是空的。C83 同時要求點名空檔案且不得提及 DPAPI，
+兩條斷言在這個變異下都會開火。
+'@
+    }
+
+    M14 = @{
+        Desc = '公鑰 PEM 格式無效的訊息退化成一般的載入失敗'
+        File = 'RunePost\Private\Get-RunePublicKey.ps1'
+        Old = 'throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"'
+        New = 'throw "公鑰載入失敗：$($_.Exception.Message)"   # MUTATION M14'
+        MustRed = @('C60', 'C62')
+        MayRed = @()
+        Tier = 'Full'
+        Note = @'
+兩條取得公鑰的路徑（~\.rune\public.pem 的內容、-PublicKey 收到的 PEM 字串）都照樣
+被拒。C60 與 C62 同時變紅，證明「PEM 格式無效」這句話在兩條路徑上各被驗了一次。
+C61（-PublicKey 指到不存在的路徑）維持綠色：那是另一個分支，本來就不該受影響。
+'@
+    }
+
+    M15 = @{
+        Desc = 'DPAPI 保護的內容由 PKCS#8 換成 SEC1 EC 私鑰（載入端一併相容，外部行為不變）'
+        File = @(
+            'RunePost\Public\New-RuneKeyPair.ps1'
+            'RunePost\Private\Get-RunePrivateKey.ps1'
+        )
+        Old = @(
+            '            $pkcs8Bytes = $ecdh.ExportPkcs8PrivateKey()'
+            '                        $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead)'
+        )
+        New = @(
+            '            $pkcs8Bytes = $ecdh.ExportECPrivateKey()   # MUTATION M15'
+            '                        try { $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead) } catch { $ecdh.ImportECPrivateKey($pkcs8Bytes, [ref] $bytesRead) }   # MUTATION M15'
+        )
+        MustRed = @('C08')
+        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54')
+        Note = @'
+DESIGN §1.7.7 規定 Dpapi 這一種格式保護的是「PKCS#8 位元組」。本變異改成保護 SEC1
+EC 私鑰位元組，並讓載入端兩種都吃 —— 於是黑箱上完全看不出差別：檔案照樣是二進位、
+照樣解得開 DPAPI、roundtrip 照樣位元一致，連 C74（既有 PKCS#8 DPAPI 私鑰必須繼續
+可用）都維持綠色，因為載入端仍然先試 PKCS#8。
+C08 變紅是唯一的訊號：獨立解密鏈照 §1.7.7 讀私鑰，只接受規格寫的那一種內容。這正是
+把「私鑰儲存格式的規格符合性」單獨隔離出來驗——C31 / C70 只查「是不是 DPAPI 二進位、
+有沒有 PEM 字樣」，查不到裡面包的是哪一種 DER。
+連帶紅的一組全部相依於同一份素材（獨立解出來的明文、或以它為前置的偽造容器），由
+fixture 的負向記憶統一指回 C08。
 '@
     }
 
@@ -308,11 +425,18 @@ function Clear-RunLock {
     if (Test-Path -LiteralPath $script:LockFile) { Remove-Item -LiteralPath $script:LockFile -Force }
 }
 
+# $Targets 是 @{ Path; Bytes } 的清單：一項變異可以同時動好幾個檔案（例如同一類
+# 錯誤訊息散在三支檔案裡），每個檔案的原始位元組都要各自留一份。
 function Set-Inflight {
-    param([string]$Path, [byte[]]$OriginalBytes, [string]$Name)
+    param([object[]]$Targets, [string]$Name)
     [void][System.IO.Directory]::CreateDirectory($script:InflightDir)
-    [System.IO.File]::WriteAllBytes((Join-Path $script:InflightDir 'original.bin'), $OriginalBytes)
-    [System.IO.File]::WriteAllText((Join-Path $script:InflightDir 'target.txt'), ($Name + "`n" + $Path), [System.Text.UTF8Encoding]::new($false))
+    $lines = [System.Collections.Generic.List[string]]::new()
+    [void]$lines.Add($Name)
+    for ($i = 0; $i -lt $Targets.Count; $i++) {
+        [System.IO.File]::WriteAllBytes((Join-Path $script:InflightDir ("original_{0}.bin" -f $i)), $Targets[$i].Bytes)
+        [void]$lines.Add($Targets[$i].Path)
+    }
+    [System.IO.File]::WriteAllText((Join-Path $script:InflightDir 'target.txt'), ($lines -join "`n"), [System.Text.UTF8Encoding]::new($false))
 }
 
 function Clear-Inflight {
@@ -325,17 +449,19 @@ function Clear-Inflight {
 # .inflight，因此任何入口（含 -List）都可以、也應該先呼叫這個函式。
 function Restore-InterruptedRun {
     $meta = Join-Path $script:InflightDir 'target.txt'
-    $bin = Join-Path $script:InflightDir 'original.bin'
-    $hasPending = (Test-Path -LiteralPath $meta) -and (Test-Path -LiteralPath $bin)
+    $hasPending = (Test-Path -LiteralPath $meta) -and (Test-Path -LiteralPath (Join-Path $script:InflightDir 'original_0.bin'))
     $hasLock = Test-Path -LiteralPath $script:LockFile
 
     if ($hasPending) {
         $lines = @([System.IO.File]::ReadAllLines($meta))
         $name = $lines[0]
-        $path = $lines[1]
         Write-Host ''
-        Write-Host "偵測到上一輪未還原的變異 $name，正在還原：$path" -ForegroundColor Yellow
-        [System.IO.File]::WriteAllBytes($path, [System.IO.File]::ReadAllBytes($bin))
+        for ($i = 1; $i -lt $lines.Count; $i++) {
+            $path = $lines[$i]
+            $bin = Join-Path $script:InflightDir ("original_{0}.bin" -f ($i - 1))
+            Write-Host "偵測到上一輪未還原的變異 $name，正在還原：$path" -ForegroundColor Yellow
+            [System.IO.File]::WriteAllBytes($path, [System.IO.File]::ReadAllBytes($bin))
+        }
         Write-Host '已還原。' -ForegroundColor Yellow
     }
     elseif ($hasLock) {
@@ -351,10 +477,10 @@ function Restore-InterruptedRun {
 # ==============================================================================
 
 function Invoke-Suite {
-    param([string]$RunName)
+    param([string]$RunName, [string]$RunTier)
     $work = Join-Path $WorkRoot $RunName
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & pwsh -NoProfile -File $script:Verify -RepoRoot $script:RepoRoot -WorkRoot $work -Clean -Tier $Tier *>&1 | Out-Null
+    & pwsh -NoProfile -File $script:Verify -RepoRoot $script:RepoRoot -WorkRoot $work -Clean -Tier $RunTier *>&1 | Out-Null
     $sw.Stop()
 
     $report = Join-Path $work 'verify-report.txt'
@@ -372,7 +498,16 @@ function Invoke-Suite {
         Red     = @($res.GetEnumerator() | Where-Object { $_.Value -eq 'FAIL' } | ForEach-Object Key)
         Skipped = @($res.GetEnumerator() | Where-Object { $_.Value -eq 'SKIP' } | ForEach-Object Key)
         Info    = @($res.GetEnumerator() | Where-Object { $_.Value -eq 'INFO' } | ForEach-Object Key)
+        Tier    = $RunTier
     }
+}
+
+# 命令列的 -Tier Full 一律優先；否則看變異自己宣告的層級（省略即 Core）。
+function Get-EffectiveTier {
+    param($Mutation)
+    if ($Tier -eq 'Full') { return 'Full' }
+    if ($Mutation.Tier -eq 'Full') { return 'Full' }
+    return $Tier
 }
 
 # ==============================================================================
@@ -394,7 +529,8 @@ if ($List) {
         $must = if ((ConvertTo-List $m.MustRed).Count) { ((ConvertTo-List $m.MustRed) -join ', ') } else { '（預期不紅）' }
         Write-Host ''
         Write-Host ("  {0,-4} {1}" -f $name, $m.Desc) -ForegroundColor White
-        Write-Host ("       目標檔案 : {0}" -f $m.File)
+        Write-Host ("       目標檔案 : {0}" -f ((ConvertTo-List $m.File) -join '；'))
+        Write-Host ("       所需層級 : {0}" -f $(if ($m.Tier) { $m.Tier } else { 'Core' }))
         Write-Host ("       必須紅   : {0}" -f $must) -ForegroundColor $(if ((ConvertTo-List $m.MustRed).Count) { 'Green' } else { 'DarkYellow' })
         if ((ConvertTo-List $m.MayRed).Count) { Write-Host ("       連帶可紅 : {0}" -f ((ConvertTo-List $m.MayRed) -join ', ')) }
         if ((ConvertTo-List $m.MustInfo).Count) { Write-Host ("       必須 INFO: {0}" -f ((ConvertTo-List $m.MustInfo) -join ', ')) }
@@ -403,7 +539,7 @@ if ($List) {
         }
     }
     Write-Host ''
-    Write-Host ('共 {0} 項。預設層級 Core；-Tier Full 可跑全部案例。' -f $script:Catalog.Count) -ForegroundColor Cyan
+    Write-Host ('共 {0} 項。各項按自己宣告的層級執行（省略即 Core）；-Tier Full 會把全部拉到 Full。' -f $script:Catalog.Count) -ForegroundColor Cyan
     exit 0
 }
 
@@ -426,7 +562,11 @@ foreach ($n in $names) {
 Write-Host ''
 Write-Host '========== runepost 驗收套件變異測試 ==========' -ForegroundColor Cyan
 Write-Host ("repo：{0}" -f $script:RepoRoot)
-Write-Host ("層級：{0}；變異：{1}" -f $Tier, ($names -join ', '))
+$tiers = @($names | ForEach-Object { Get-EffectiveTier $script:Catalog[$_] })
+# 對照組必須涵蓋所有變異會用到的案例，否則 Full-only 案例在對照組就紅了也看不見。
+$ctrlTier = if ($tiers -contains 'Full') { 'Full' } else { 'Core' }
+Write-Host ("層級：{0}（實際各項：{1}）；變異：{2}" -f $Tier,
+    (($names | ForEach-Object { '{0}={1}' -f $_, (Get-EffectiveTier $script:Catalog[$_]) }) -join ' '), ($names -join ', '))
 Write-Host ''
 Write-Host '植入期間本 repo 的產品程式碼會處於被刻意植入缺陷的中間狀態：' -ForegroundColor Yellow
 Write-Host '請勿在此期間讀取、複製、打包或建立這份 repo 的副本。' -ForegroundColor Yellow
@@ -439,8 +579,8 @@ Write-Host ("產品程式碼基線雜湊：{0}" -f $baseHash.Substring(0, 32) + 
 # 所有否定性結論都不可信，因此直接中止。
 if (-not $SkipControl) {
     Write-Host ''
-    Write-Host '-- 對照組（未植入任何變異）--' -ForegroundColor Cyan
-    $ctrl = Invoke-Suite -RunName 'control'
+    Write-Host ("-- 對照組（未植入任何變異，層級 {0}）--" -f $ctrlTier) -ForegroundColor Cyan
+    $ctrl = Invoke-Suite -RunName 'control' -RunTier $ctrlTier
     Write-Host ("   {0}（{1}s）" -f $ctrl.Summary, $ctrl.Seconds)
     if ($ctrl.Red.Count -gt 0) {
         Write-Host ''
@@ -460,41 +600,64 @@ Set-RunLock
 
 foreach ($name in $names) {
     $m = $script:Catalog[$name]
-    $path = Join-Path $script:RepoRoot $m.File
-    if (-not (Test-Path -LiteralPath $path)) { throw "$name：找不到目標檔案 $path" }
 
     $olds = (ConvertTo-List $m.Old)
     $news = (ConvertTo-List $m.New)
     if ($olds.Count -ne $news.Count) { throw "$name：Old 與 New 的數量不一致" }
 
-    $origBytes = [System.IO.File]::ReadAllBytes($path)
-    $hasBom = ($origBytes.Length -ge 3 -and $origBytes[0] -eq 0xEF -and $origBytes[1] -eq 0xBB -and $origBytes[2] -eq 0xBF)
-    $origText = [System.IO.File]::ReadAllText($path)
-    foreach ($o in $olds) {
-        if (-not $origText.Contains($o)) { throw "$name：目標檔案裡找不到要替換的片段（產品程式碼可能已改寫，請更新變異定義）：$o" }
-    }
+    # File 可以是單一檔案（所有替換都在它裡面）或與 Old/New 等長的清單（同一項變異
+    # 動好幾支檔案，例如同一類錯誤訊息散在三個地方）。
+    $fileList = (ConvertTo-List $m.File)
+    if ($fileList.Count -eq 1) { $fileList = @($olds | ForEach-Object { $fileList[0] }) }
+    if ($fileList.Count -ne $olds.Count) { throw "$name：File 既不是單一檔案，數量也對不上 Old/New" }
 
+    # 依檔案彙整替換，並先把原始位元組全部讀進來
+    $targets = [ordered]@{}
+    for ($i = 0; $i -lt $olds.Count; $i++) {
+        $path = Join-Path $script:RepoRoot $fileList[$i]
+        if (-not (Test-Path -LiteralPath $path)) { throw "$name：找不到目標檔案 $path" }
+        if (-not $targets.Contains($path)) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $targets[$path] = [pscustomobject]@{
+                Path  = $path
+                Bytes = $bytes
+                HasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+                Text  = [System.IO.File]::ReadAllText($path)
+                Pairs = [System.Collections.Generic.List[object]]::new()
+            }
+        }
+        if (-not $targets[$path].Text.Contains($olds[$i])) {
+            throw "$name：目標檔案裡找不到要替換的片段（產品程式碼可能已改寫，請更新變異定義）：$($olds[$i])"
+        }
+        [void]$targets[$path].Pairs.Add(@{ Old = $olds[$i]; New = $news[$i] })
+    }
+    $targetList = @($targets.Values)
+    $pathList = ($targetList | ForEach-Object { $_.Path }) -join '；'
+
+    $runTier = Get-EffectiveTier $m
     Write-Host ''
-    Write-Host ("-- {0}：{1} --" -f $name, $m.Desc) -ForegroundColor Yellow
+    Write-Host ("-- {0}：{1}（層級 {2}）--" -f $name, $m.Desc, $runTier) -ForegroundColor Yellow
 
     $run = $null
     try {
-        $mut = $origText
-        for ($i = 0; $i -lt $olds.Count; $i++) { $mut = $mut.Replace($olds[$i], $news[$i]) }
-        Set-Inflight -Path $path -OriginalBytes $origBytes -Name $name
-        [System.IO.File]::WriteAllText($path, $mut, [System.Text.UTF8Encoding]::new($hasBom))
-        $run = Invoke-Suite -RunName ("run_" + $name)
+        Set-Inflight -Targets $targetList -Name $name
+        foreach ($t in $targetList) {
+            $mut = $t.Text
+            foreach ($p in $t.Pairs) { $mut = $mut.Replace($p.Old, $p.New) }
+            [System.IO.File]::WriteAllText($t.Path, $mut, [System.Text.UTF8Encoding]::new($t.HasBom))
+        }
+        $run = Invoke-Suite -RunName ("run_" + $name) -RunTier $runTier
     }
     finally {
         # 還原一律用原始位元組寫回；失敗要吵到不可能被忽略。
         try {
-            [System.IO.File]::WriteAllBytes($path, $origBytes)
+            foreach ($t in $targetList) { [System.IO.File]::WriteAllBytes($t.Path, $t.Bytes) }
             Clear-Inflight
         }
         catch {
             Write-Host ''
-            Write-Host ('嚴重：無法還原被植入變異的產品程式碼！受影響檔案：' + $path) -ForegroundColor Red
-            Write-Host ('原始位元組保留在：' + (Join-Path $script:InflightDir 'original.bin')) -ForegroundColor Red
+            Write-Host ('嚴重：無法還原被植入變異的產品程式碼！受影響檔案：' + $pathList) -ForegroundColor Red
+            Write-Host ('原始位元組保留在：' + $script:InflightDir) -ForegroundColor Red
             Write-Host ('請先手動還原該檔案再繼續使用本 repo。') -ForegroundColor Red
             throw
         }
@@ -504,7 +667,7 @@ foreach ($name in $names) {
     $restored = ($nowHash -eq $baseHash)
     if (-not $restored) {
         Write-Host ''
-        Write-Host ('嚴重：還原後產品程式碼雜湊與基線不符。受影響檔案：' + $path) -ForegroundColor Red
+        Write-Host ('嚴重：還原後產品程式碼雜湊與基線不符。受影響檔案：' + $pathList) -ForegroundColor Red
         Write-Host ('  基線 {0}' -f $baseHash) -ForegroundColor Red
         Write-Host ('  目前 {0}' -f $nowHash) -ForegroundColor Red
         Write-Host ('狀態旗標刻意保留：' + $script:LockFile) -ForegroundColor Red
@@ -531,6 +694,7 @@ foreach ($name in $names) {
     $rows.Add([pscustomobject]@{
             變異     = $name
             說明     = $m.Desc
+            層級     = $runTier
             必須紅   = $(if ($must.Count) { $must -join ',' } else { '（無）' })
             實際紅   = $(if ($run.Red.Count) { $run.Red -join ',' } else { '（無）' })
             判定     = $verdict
@@ -545,7 +709,7 @@ foreach ($name in $names) {
     if ($missing.Count) { Write-Host ("   預期紅卻沒紅：{0} —— 這些案例對本缺陷咬不動，必須查明" -f ($missing -join ',')) -ForegroundColor Red }
     if ($infoMissing.Count) { Write-Host ("   預期轉 INFO 卻沒有：{0}" -f ($infoMissing -join ',')) -ForegroundColor Red }
     if ($unexpected.Count) { Write-Host ("   非預期連帶紅：{0} —— 若屬合理連鎖，請補進 MayRed" -f ($unexpected -join ',')) -ForegroundColor Red }
-    if ($notRun.Count) { Write-Host ("   本層級未執行：{0}（改用 -Tier Full）" -f ($notRun -join ',')) -ForegroundColor DarkYellow }
+    if ($notRun.Count) { Write-Host ("   本層級未執行：{0}（該項變異應宣告 Tier = 'Full'）" -f ($notRun -join ',')) -ForegroundColor DarkYellow }
     if ($m.Note) { $notes.Add(($name + '：' + $m.Note.Trim())) }
 }
 

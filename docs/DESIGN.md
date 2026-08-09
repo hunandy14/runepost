@@ -107,6 +107,29 @@ M0 實測基準:`ephPubKeyLen = 91`,舊格式 `nonce@98 / tag@110`;新格式應�
 
 `Get-RuneHkdfInfo` 由 10 行變 ~13 行:多一個 `$ContentType` 參數、配置長度 `+1`、寫入該 byte、後續 `BlockCopy` 目標位移 `+1`。
 
+#### 1.3.1 金鑰派生的完整參數
+
+內容金鑰一律以 HKDF-SHA256 派生。以下四項參數與 AAD 的用法全部定死,加密端、解密端與獨立驗證端都不得自行選擇:
+
+| 項目 | 值 |
+|---|---|
+| 演算法 | HKDF,雜湊為 **SHA-256** |
+| `ikm` | ECDH P-256 `DeriveRawSecretAgreement` 回傳的**原始共享祕密**(共享點的 x 座標,32 bytes),**不先經任何雜湊** |
+| `salt` | 容器內的 **nonce**(12 bytes,§1.1 位移 `8+n`) |
+| `info` | `magic(4) ‖ version(1) ‖ contentType(1) ‖ ephemeral 公鑰 SPKI DER`(§1.3) |
+| 輸出長度 | **32 bytes**,直接作為 AES-256-GCM 的金鑰 |
+
+**AES-GCM 不使用 AAD**,tag 僅涵蓋 ciphertext。header 的完整性完全由 `info` 承擔(§1.3);兩者擇一即可,同時使用不會提高保障,只會讓「哪個欄位保護哪一段」難以推理。
+
+逐項理由:
+
+- **`ikm` 取原始共享祕密而非其雜湊。** HKDF 的 extract 階段本來就是為「分布不均勻的原始金鑰材料」設計的,自行先雜湊一次是多餘的一層,還會讓任何以標準工具重現派生的人對不上步驟。
+- **`salt` 取 nonce。** nonce 每次加密重新隨機產生,且明文隨容器攜帶,解密端不必額外欄位就能重建 salt。**但這使 nonce 的隨機性成為本規格的安全前提,而不只是 GCM 的要求**:HMAC 會把短於 block size 的 salt 補零,nonce 一旦退化為全零位元組,`salt = nonce` 與 `salt = null` 會導出同一把金鑰。
+- **輸出 32 bytes。** 對應 AES-256。
+- **`info` 的內容見 §1.3。** contentType 進 `info` 是安全必要條件,不是可選項。
+
+本節為規範。`tests/verify.ps1` 的 C08 直接照這五格派生金鑰並要求通過 GCM 驗證,**不做任何參數搜尋**:派生不出可用金鑰即判定為實作與本節不符。
+
 ### 1.4 型別合法性檢查必須在 GCM 解密**之後**
 
 | 檢查位置 | 「位元被竄改」的訊息 | 「較新版本產生」的訊息 |
@@ -845,6 +868,8 @@ transfer.ps1   SHA-256 = 1B2301F11C13BB1D8F849A416444ADB455BD0745EB00A007FC514EB
 樣本容器       magic=CTXT version=0x02 ephPubKeyLen=91 nonce@98 tag@110 總長 340 B
 M0 實測 KDF    HKDF(salt=nonce, info=magicver+epk), AAD=none
 ```
+
+上表最後一行是**對 M0 當時那份 CTXT 產物的觀測記錄**,不是規格。金鑰派生的規範條文在 **§1.3.1**;該節的 `info` 另含 contentType,與此處觀測到的 `magicver+epk` 不同,差異即為 §1.3 要求的變更。
 
 **M1 必須新增的案例**:以該樣本餵給改名後的解密腳本,必須以「容器格式錯誤:檔頭 magic 不符(讀到 'CTXT')」被拒絕、exit 1、Destination 不留任何檔案。
 
