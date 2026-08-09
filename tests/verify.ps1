@@ -98,6 +98,8 @@ function Assert {
 }
 
 function Skip-Case { param([string]$Message) throw "SKIP:$Message" }
+# INFO 是「測試端偵測到異常但無法斷言對錯」用的。目前沒有任何案例使用：凡是「照規格
+# 寫的驗證器讀不出實作寫出來的東西」一律判 FAIL，那是規格與實作不符的直接證據。
 function Info-Case { param([string]$Message) throw "INFO:$Message" }
 
 # 案例執行器：Body 回傳字串 => PASS；throw 'SKIP:x' / 'INFO:x' => SKIP / INFO；其餘 throw => FAIL
@@ -677,40 +679,66 @@ function New-ZipWithEntries {
 #    直接判 FAIL。
 # ==============================================================================
 
+# DESIGN §1.7.7 定死的私鑰儲存格式。三種格式共用 ~\.rune\private.key 這一個路徑，
+# 由內容判別，比對順序必須先 1 後 2 —— 格式 2 的標記是格式 1 的子字串：
+#   1. 含 -----BEGIN ENCRYPTED PRIVATE KEY----- → 密碼保護的 PKCS#8 PEM
+#   2. 含 -----BEGIN PRIVATE KEY-----           → 未加密的 PKCS#8 PEM
+#   3. 其餘                                      → DPAPI(CurrentUser、entropy = null) 保護的 PKCS#8 位元組
+# 0 位元組的檔案在判別之前先擋下（落進第 3 條會報成 DPAPI 解保護失敗，與實情不符）；
+# 三種格式匯入後一律驗證曲線為 P-256。
+#
+# 這是與 KDF 同一性質的白盒：照規格寫的還原器讀不出實作寫出來的私鑰檔，就是實作與
+# DESIGN §1.7.7 不符，因此一律擲錯並點名是哪一種格式、對不上哪一條，不做格式猜測、
+# 不退回 $null。
 function Import-PrivateKeyFromBlob {
-    # 私鑰檔有三種儲存格式（未加密 PKCS#8 PEM／密碼保護 PKCS#8 PEM／DPAPI 位元組），
-    # 共用同一個路徑、靠內容判別。此處只還原不需要密碼的兩種；密碼保護的一律回傳
-    # $null，由呼叫端當成「無法獨立重建」處理。
-    param([string]$BlobPath)
-    $blob = [System.IO.File]::ReadAllBytes($BlobPath)
-    $asText = [System.Text.Encoding]::UTF8.GetString($blob)
-    if ($asText -match '-----BEGIN ENCRYPTED PRIVATE KEY-----') { return $null }
-    if ($asText -match '-----BEGIN [A-Z ]*PRIVATE KEY-----') {
-        $pemKey = [System.Security.Cryptography.ECDiffieHellman]::Create()
-        try { $pemKey.ImportFromPem($asText); return $pemKey } catch { return $null }
-    }
-    $payload = $null
-    foreach ($scope in @('CurrentUser', 'LocalMachine')) {
-        try {
-            $payload = [System.Security.Cryptography.ProtectedData]::Unprotect($blob, $null, [System.Security.Cryptography.DataProtectionScope]::$scope)
-            break
-        } catch { }
-    }
-    if ($null -eq $payload) { return $null }
+    param([string]$BlobPath, [string]$Passphrase)
 
-    $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
-    $ok = $false
-    foreach ($how in @('pkcs8', 'ec', 'pem')) {
-        try {
-            switch ($how) {
-                'pkcs8' { $ecdh.ImportPkcs8PrivateKey($payload, [ref]([int]0)) }
-                'ec' { $ecdh.ImportECPrivateKey($payload, [ref]([int]0)) }
-                'pem' { $ecdh.ImportFromPem([System.Text.Encoding]::UTF8.GetString($payload)) }
-            }
-            $ok = $true; break
-        } catch { }
+    $blob = [System.IO.File]::ReadAllBytes($BlobPath)
+    if ($blob.Length -eq 0) {
+        throw "私鑰檔為 0 位元組：$BlobPath。DESIGN §1.7.7 的三種儲存格式沒有一種可以是空檔案"
     }
-    if (-not $ok) { return $null }
+    $asText = [System.Text.Encoding]::UTF8.GetString($blob)
+    $ecdh = [System.Security.Cryptography.ECDiffieHellman]::Create()
+
+    try {
+        if ($asText.Contains('-----BEGIN ENCRYPTED PRIVATE KEY-----')) {
+            if (-not $Passphrase) {
+                throw "私鑰檔判別為 DESIGN §1.7.7 格式 1（密碼保護的 PKCS#8 PEM），但本次呼叫未提供密碼，無法還原：$BlobPath"
+            }
+            try { $ecdh.ImportFromEncryptedPem($asText, $Passphrase) }
+            catch {
+                throw "私鑰檔判別為 DESIGN §1.7.7 格式 1（密碼保護的 PKCS#8 PEM），但 ImportFromEncryptedPem 以所給的密碼讀不出來，代表密碼不符或落地內容與 §1.7.7 規定的 ExportEncryptedPkcs8PrivateKeyPem 不符：$($_.Exception.Message)"
+            }
+        }
+        elseif ($asText.Contains('-----BEGIN PRIVATE KEY-----')) {
+            try { $ecdh.ImportFromPem($asText) }
+            catch {
+                throw "私鑰檔判別為 DESIGN §1.7.7 格式 2（未加密的 PKCS#8 PEM），但 ImportFromPem 讀不出來，代表落地內容與 §1.7.7 規定的 ExportPkcs8PrivateKeyPem 不符：$($_.Exception.Message)"
+            }
+        }
+        else {
+            $payload = $null
+            try {
+                $payload = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                    $blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            }
+            catch {
+                throw "私鑰檔判別為 DESIGN §1.7.7 格式 3（DPAPI 位元組），但 ProtectedData.Unprotect(CurrentUser, entropy = null) 解不開，與 §1.7.7「DPAPI 的位元組格式與 Unprotect(CurrentUser, entropy = null) 的呼叫方式皆不得改變」不符：$($_.Exception.Message)"
+            }
+            try { $ecdh.ImportPkcs8PrivateKey($payload, [ref]([int]0)) }
+            catch {
+                throw "私鑰檔判別為 DESIGN §1.7.7 格式 3（DPAPI 位元組）且解保護成功，但內容不是 PKCS#8 私鑰，與 §1.7.7「DPAPI(CurrentUser，無 entropy)保護的 PKCS#8 位元組」不符：$($_.Exception.Message)"
+            }
+            finally { if ($payload) { [Array]::Clear($payload, 0, $payload.Length) } }
+        }
+
+        $curveOid = $ecdh.ExportParameters($false).Curve.Oid.Value
+        if ($curveOid -ne '1.2.840.10045.3.1.7') {
+            throw "私鑰匯入後曲線不是 P-256（OID 為 $curveOid），與 §1.7.7「三種格式匯入後一律驗證曲線為 P-256」不符"
+        }
+    }
+    catch { $ecdh.Dispose(); throw }
+
     return $ecdh
 }
 
@@ -1302,29 +1330,20 @@ Register-Fixture 'CtTree' { return (New-Container -Name 'tree' -Source (Get-FxPa
 
 # ---- 獨立解密鏈的還原結果 ----
 
-# 私鑰 blob 的內部格式（DPAPI 位元組／PKCS#8 PEM／密碼保護 PEM）不在容器規格內，
-# 還原不了是測試端的限制而非受測物的缺陷，因此回 $null 而不是擲錯。
+# 依 DESIGN §1.7.7 的規格獨立還原測試私鑰。金鑰 A 以 -Protect Dpapi 產生，走的是格式 3；
+# 讀不出來即實作與 §1.7.7 不符，Import-PrivateKeyFromBlob 會擲錯，這份素材連帶失敗。
 Register-Fixture 'PrivateKeyA' { return (Import-PrivateKeyFromBlob -BlobPath (Get-Fixture 'KeyA').KeyPath) }
 
 # 依 DESIGN §1 的規格參數解出資料夾密文。規格參數派生不出可用金鑰時 Resolve-ContentKey
 # 會擲錯，這份素材連帶失敗，依賴它的案例由 fixture 的負向記憶統一指回 C08。
 Register-Fixture 'KdfInfo' {
-    $ecdh = Get-Fixture 'PrivateKeyA'
-    if ($null -eq $ecdh) { return $null }
     $c = Read-Container (Get-Fixture 'CtTree').Out
-    return (Resolve-ContentKey -Container $c -Ecdh $ecdh)
+    return (Resolve-ContentKey -Container $c -Ecdh (Get-Fixture 'PrivateKeyA'))
 }
 
 Register-Fixture 'ZipTree' {
-    $k = Get-Fixture 'KdfInfo'
-    if ($null -eq $k) { return $null }
-    $bytes = Expand-Brotli -Data $k.Plain
+    $bytes = Expand-Brotli -Data (Get-Fixture 'KdfInfo').Plain
     return , $bytes
-}
-
-# 需要獨立解出既有容器的案例統一用這個前置檢查，措辭一致
-function Assert-PrivateKeyAvailable {
-    if ($null -eq (Get-Fixture 'PrivateKeyA')) { Skip-Case '測試私鑰 blob 無法獨立還原（見 C08），解不開既有容器' }
 }
 
 # ---- 金鑰輪替（-GenerateKeys -Force）----
@@ -1730,12 +1749,9 @@ Invoke-TCase 'C07' 'ephemeral 公鑰確為可匯入的 P-256 SubjectPublicKeyInf
 }
 
 Invoke-TCase 'C08' '獨立解密鏈：以 DESIGN §1 的規格參數派生金鑰（ECDH→HKDF-SHA256→AES-GCM→Brotli→Zip）' -Tier Core -Needs @('CtTree') {
-    # 這一案不猜參數：salt 就是 nonce，info 就是 magic‖version‖contentType‖ephemeral
-    # 公鑰 DER，GCM 不帶 AAD。派生出來的金鑰通不過 GCM 驗證就是實作與規格不符，
-    # KdfInfo 這份素材會直接擲錯把本案判紅，不會退化成「猜不到」這種模糊結論。
-    if ($null -eq (Get-Fixture 'PrivateKeyA')) {
-        Info-Case '私鑰 blob 無法以 DPAPI(null entropy)+PKCS8/EC/PEM 還原，無法獨立重建金鑰（規格未定義 blob 內部格式）'
-    }
+    # 整條鏈上沒有任何一步靠猜：私鑰照 §1.7.7 的三種儲存格式判別後匯入，salt 就是
+    # nonce，info 就是 magic‖version‖contentType‖ephemeral 公鑰 DER，GCM 不帶 AAD。
+    # 任何一步讀不出來或驗不過，都是實作與規格不符，由素材直接擲錯把本案判紅。
     $k = Get-Fixture 'KdfInfo'
     $zip = Get-Fixture 'ZipTree'
     Assert ($zip.Length -gt 0) 'Brotli 解壓結果為空'
@@ -1750,7 +1766,6 @@ Invoke-TCase 'C08' '獨立解密鏈：以 DESIGN §1 的規格參數派生金鑰
 
 Invoke-TCase 'C09' 'ZIP 為純 store（NoCompression）且單檔也打包' -Tier Core -Needs @('ZipTree', 'CtSingle') {
     $zip = Get-Fixture 'ZipTree'
-    if ($null -eq $zip) { Assert-PrivateKeyAvailable }
     $e = Get-ZipCentralDirectory -Zip $zip
     $bad = @($e | Where-Object { $_.Method -ne 0 })
     Assert ($bad.Count -eq 0) ('有 {0} 筆非 store（method={1}）' -f $bad.Count, ($bad[0].Method))
@@ -1767,7 +1782,6 @@ Invoke-TCase 'C09' 'ZIP 為純 store（NoCompression）且單檔也打包' -Tier
 
 Invoke-TCase 'C10' 'ZIP 檔名 UTF-8（非 ASCII 項目須設 bit 11 且位元組為 UTF-8）' -Tier Core -Needs @('ZipTree') {
     $zip = Get-Fixture 'ZipTree'
-    if ($null -eq $zip) { Assert-PrivateKeyAvailable }
     $e = Get-ZipCentralDirectory -Zip $zip
     $nonAscii = @($e | Where-Object { -not $_.NameIsAscii })
     Assert ($nonAscii.Count -gt 0) '素材中的中文路徑未出現在 zip 項目名（可能被轉碼或遺失）'
@@ -1907,7 +1921,6 @@ Invoke-TCase 'C18' '非 base64 內容 → 報 base64/編碼環節錯誤' -Tier F
 }
 
 Invoke-TCase 'C19' '偽造容器（tag 合法但明文非 Brotli）→ 報解壓失敗' -Tier Full -Needs @('KdfInfo', 'CtSingle', 'KeyA') {
-    Assert-PrivateKeyAvailable
     # 用受測物自己的容器換掉密文：header 與 nonce 原封不動，因此規格參數派生出來的
     # 金鑰不變，只是拿它重新加密一段非 Brotli 明文。
     $c = Read-Container (Get-Fixture 'CtSingle').Out

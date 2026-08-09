@@ -280,6 +280,35 @@ C61（-PublicKey 指到不存在的路徑）維持綠色：那是另一個分支
 '@
     }
 
+    M15 = @{
+        Desc = 'DPAPI 保護的內容由 PKCS#8 換成 SEC1 EC 私鑰（載入端一併相容，外部行為不變）'
+        File = @(
+            'RunePost\Public\New-RuneKeyPair.ps1'
+            'RunePost\Private\Get-RunePrivateKey.ps1'
+        )
+        Old = @(
+            '            $pkcs8Bytes = $ecdh.ExportPkcs8PrivateKey()'
+            '                        $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead)'
+        )
+        New = @(
+            '            $pkcs8Bytes = $ecdh.ExportECPrivateKey()   # MUTATION M15'
+            '                        try { $ecdh.ImportPkcs8PrivateKey($pkcs8Bytes, [ref] $bytesRead) } catch { $ecdh.ImportECPrivateKey($pkcs8Bytes, [ref] $bytesRead) }   # MUTATION M15'
+        )
+        MustRed = @('C08')
+        MayRed = @('C09', 'C10', 'C19', 'C37', 'C41', 'C44', 'C46', 'C47', 'C54')
+        Note = @'
+DESIGN §1.7.7 規定 Dpapi 這一種格式保護的是「PKCS#8 位元組」。本變異改成保護 SEC1
+EC 私鑰位元組，並讓載入端兩種都吃 —— 於是黑箱上完全看不出差別：檔案照樣是二進位、
+照樣解得開 DPAPI、roundtrip 照樣位元一致，連 C74（既有 PKCS#8 DPAPI 私鑰必須繼續
+可用）都維持綠色，因為載入端仍然先試 PKCS#8。
+C08 變紅是唯一的訊號：獨立解密鏈照 §1.7.7 讀私鑰，只接受規格寫的那一種內容。這正是
+把「私鑰儲存格式的規格符合性」單獨隔離出來驗——C31 / C70 只查「是不是 DPAPI 二進位、
+有沒有 PEM 字樣」，查不到裡面包的是哪一種 DER。
+連帶紅的一組全部相依於同一份素材（獨立解出來的明文、或以它為前置的偽造容器），由
+fixture 的負向記憶統一指回 C08。
+'@
+    }
+
     M5 = @{
         Desc = '拿掉私鑰檔的 ACL 收斂'
         File = 'RunePost\Private\Set-RunePrivateKeyAcl.ps1'
