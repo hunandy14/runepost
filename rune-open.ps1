@@ -26,8 +26,10 @@
     這是把 DPAPI 私鑰離機保存的唯一途徑。
 
     -GenerateKeys 若偵測到 ~\.rune\private.key 已存在，不會直接覆蓋：互動環境下
-    會先印出現有金鑰的指紋，提示是否要產生新金鑰（預設為「不繼續」，直接 Enter
-    或輸入 y/yes 以外的任何內容都會取消）；一旦確認（或帶 -Force 跳過提示），
+    會先印出現有金鑰的指紋，再以 PowerShell 標準的確認提示詢問是否產生新金鑰
+    （選項 Y／A／N／L／S，預設為 Y，直接按 Enter 即繼續；不要繼續請明確選 N。
+    安全性來自舊金鑰改名保留而不是刪除，不依賴提示的預設值）；一旦確認（或帶
+    -Force 跳過提示），
     會先把舊的 private.key／public.pem 改名為同一時間戳的 .bak 檔（不是刪除），
     才產生並寫入新金鑰對。舊私鑰仍在，只是換了副檔名，用 -KeyFile 指向備份路徑
     即可繼續解密用舊公鑰加密的密文；但比對指紋仍然重要——確認要換的是哪一把，
@@ -69,7 +71,8 @@
     .\rune-open.ps1 -GenerateKeys
     產生 ECDH P-256 金鑰對：私鑰以未加密的 PKCS#8 PEM 存到 ~\.rune\private.key，
     公鑰同時寫到 ~\.rune\public.pem，畫面印出兩者路徑與公鑰指紋，並警告私鑰未加密。
-    若 private.key 已存在，會先印出現有指紋並詢問是否繼續（預設不繼續）；確認後舊金鑰
+    若 private.key 已存在，會先印出現有指紋並詢問是否繼續（PowerShell 標準確認提示，
+    預設為繼續，不要繼續請選 N）；確認後舊金鑰
     會改名保留為 private.key.bak-<時間戳>（與對應的 public.pem.bak-<時間戳>），
     舊密文仍可用 -KeyFile 指向備份路徑解密。
 
@@ -264,9 +267,9 @@ try {
     }
 }
 catch {
-    # 用 [Console]::Error.WriteLine 直接印一行錯誤訊息，不用 Write-Error——
+    # 用 [Console]::Error.WriteLine 直接印例外訊息本身，不用 Write-Error——
     # 避免 PowerShell 錯誤記錄框架附加的呼叫堆疊／分類等雜訊，讓使用者只看到
-    # 乾淨的一行錯誤說明。
+    # 乾淨的錯誤說明。WriteLine 只呼叫一次，但訊息本身可以內嵌換行。
     [Console]::Error.WriteLine($_.Exception.Message)
     exit 1
 }

@@ -2120,7 +2120,7 @@ Invoke-TCase 'C33' '-KeyFile 預設值 ~\.rune\private.key（不給 -KeyFile 也
 }
 
 # -GenerateKeys 對「私鑰已存在」的處置（見 rune-open.ps1 的 .DESCRIPTION）：
-#   互動環境 → 印出現有指紋後詢問（預設不繼續）；
+#   互動環境 → 印出現有指紋後詢問（PowerShell 標準確認提示，預設為繼續）；
 #   非互動環境（stdin 被重導向）且無 -Force → 直接拒絕，不卡在提示；
 #   帶 -Force → 略過提示，先把舊的 private.key / public.pem 改名為
 #               <原檔名>.bak-<時間戳>（是改名不是刪除），才寫入新金鑰對。
