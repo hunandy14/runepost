@@ -104,7 +104,8 @@ $script:Catalog = [ordered]@{
 本項預期「不紅」，收錄的目的是把這個結論明確記錄在變異目錄裡。
 Expand-RuneZip 有兩道路徑檢查：(a) entry 名稱含反斜線一律拒絕；(b) 正規化後
 要求仍在目的資料夾內。(b) 涵蓋 (a) 的全部輸入，所以只拿掉 (a) 之後外部行為
-完全相同，只有錯誤措辭從「entry 名稱含反斜線」變成「跳脫目的資料夾」。這在
+完全相同，只有錯誤措辭從 the entry name contains a backslash 變成
+the entry escapes the destination folder。這在
 黑箱上不可觀測，要讓它紅只能斷言「哪一道檢查開火」，那是對實作細節過度指定。
 兩道檢查各自確實有被覆蓋，由 M1b 與 M1c 分別證明。
 '@
@@ -183,19 +184,19 @@ C08 的證據欄此時會多列出「salt=null」「salt=空位元組陣列」�
         Desc = '兩則路徑安全訊息退化成一般的封存格式錯誤'
         File = 'RunePost\Private\Expand-RuneZip.ps1'
         Old = @(
-            '"偵測到不安全的封存路徑（entry 名稱含反斜線）：$($entry.FullName)")'
-            '"偵測到不安全的封存路徑（跳脫目的資料夾）：$($entry.FullName)")'
+            '"Unsafe archive path detected (the entry name contains a backslash): $($entry.FullName)")'
+            '"Unsafe archive path detected (the entry escapes the destination folder): $($entry.FullName)")'
         )
         New = @(
-            '"封存格式錯誤：$($entry.FullName)")   # MUTATION M7'
-            '"封存格式錯誤：$($entry.FullName)")   # MUTATION M7'
+            '"Archive format error: $($entry.FullName)")   # MUTATION M7'
+            '"Archive format error: $($entry.FullName)")   # MUTATION M7'
         )
         MustRed = @('C37', 'C41', 'C46', 'C47')
         MayRed = @()
         Note = @'
 檢查本身完好，仍然拒絕、仍然不逸出，只有措辭退化。四案全紅代表訊息斷言確實有
-咬合力——「不安全的封存路徑」是獨立語意，不可以用「格式損壞」搪塞過去，否則
-使用者會把攻擊誤讀成檔案壞掉。
+咬合力——Unsafe archive path detected 是獨立語意，不可以用 Archive format error
+搪塞過去，否則使用者會把攻擊誤讀成檔案壞掉。
 '@
     }
 
@@ -209,14 +210,15 @@ C08 的證據欄此時會多列出「salt=null」「salt=空位元組陣列」�
     M11 = @{
         Desc = '曲線不符的訊息退化成一般的公鑰載入失敗'
         File = 'RunePost\Private\Get-RunePublicKey.ps1'
-        Old = 'throw "公鑰不是 P-256：曲線 OID 為 $curveOid，本工具僅支援 P-256（$($Script:P256CurveOid)）"'
-        New = 'throw "公鑰載入失敗：OID 為 $curveOid"   # MUTATION M11'
+        Old = 'throw "The recipient public key is not P-256: the curve OID is $curveOid. This tool supports P-256 ($($Script:P256CurveOid)) only."'
+        New = 'throw "Cannot load the recipient public key: the OID is $curveOid."   # MUTATION M11'
         MustRed = @('C45')
         MayRed = @()
         Note = @'
-公鑰仍然被拒、仍然不產生輸出檔，只是不再點名曲線。C45 變紅代表「須明確報曲線不符」
-這條斷言真的咬得動：使用者拿到 P-384 公鑰時要能知道該換一把 P-256，光說「載入失敗」
-會被誤讀成檔案壞掉。
+公鑰仍然被拒、仍然不產生輸出檔，只是不再點名曲線（退化後的訊息裡沒有 curve、
+也沒有 P-256，因此 stage.curve 這條樣式整條落空）。C45 變紅代表「須明確報曲線
+不符」這條斷言真的咬得動：使用者拿到 P-384 公鑰時要能知道該換一把 P-256，
+光說 Cannot load the recipient public key 會被誤讀成檔案壞掉。
 '@
     }
 
@@ -228,21 +230,21 @@ C08 的證據欄此時會多列出「salt=null」「salt=空位元組陣列」�
             'RunePost\Public\New-RuneKeyPair.ps1'
         )
         Old = @(
-            'throw "私鑰密碼未提供：目前為非互動環境（標準輸入已重新導向），無法顯示密碼提示。`n請以 $ParameterName 傳入 SecureString，例如 $ParameterName (Read-Host -AsSecureString)。"'
-            'throw "私鑰匯出已中止：目前為非互動環境（標準輸入已重新導向），無法顯示確認提示。`n請加上 -Confirm:`$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。"'
-            'throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n非互動環境無法提示確認，請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"'
+            'throw "No passphrase was supplied for the private key. This is a non-interactive session (standard input is redirected), so the passphrase prompt cannot be displayed.`nPass a SecureString with $ParameterName, for example $ParameterName (Read-Host -AsSecureString)."'
+            'throw "Cannot export the private key: this is a non-interactive session (standard input is redirected), so the confirmation prompt cannot be displayed.`nSpecify -Confirm:`$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session."'
+            'throw "The private key already exists: $($Script:DefaultKeyFile)`nThis is a non-interactive session, so the confirmation prompt cannot be displayed. Specify -Force to create a new key pair (the existing key pair is renamed and kept, not deleted), or move the existing file aside and run the command again."'
         )
         New = @(
-            'throw "私鑰密碼未提供。`n請以 $ParameterName 傳入 SecureString，例如 $ParameterName (Read-Host -AsSecureString)。"   # MUTATION M12'
-            'throw "私鑰匯出已中止。`n請加上 -Confirm:`$false 略過確認（rune-open.ps1 請用 -Force），或於互動環境重新執行。"   # MUTATION M12'
-            'throw "私鑰檔案已存在：$($Script:DefaultKeyFile)`n請加 -Force 直接產生新金鑰（舊金鑰仍會改名保留，不會刪除），或手動處理後再重新執行。"   # MUTATION M12'
+            'throw "No passphrase was supplied for the private key.`nPass a SecureString with $ParameterName, for example $ParameterName (Read-Host -AsSecureString)."   # MUTATION M12'
+            'throw "Cannot export the private key.`nSpecify -Confirm:`$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session."   # MUTATION M12'
+            'throw "The private key already exists: $($Script:DefaultKeyFile)`nSpecify -Force to create a new key pair (the existing key pair is renamed and kept, not deleted), or move the existing file aside and run the command again."   # MUTATION M12'
         )
         MustRed = @('C73', 'C76', 'C79', 'C86', 'C87')
         MayRed = @()
         Tier = 'Full'
         Note = @'
 三處都照樣拒絕、照樣不產生檔案、照樣不卡在提示，出路指引（-Passphrase / -Force /
--Confirm:$false）也原封不動，只有「目前為非互動環境」這句話沒了。
+-Confirm:$false）也原封不動，只有 This is a non-interactive session 這句話沒了。
 Read-RunePassphrase 那一處讓 C73 與 C76 變紅（解密與匯出兩條要密碼的路徑各一次），
 Export-RunePrivateKey 那一處讓 C79、C86 與 C87(b) 變紅（非互動、-Force 不代表略過
 確認、呼叫端 ConfirmPreference=None 三種情境各一次）。
@@ -255,8 +257,8 @@ New-RuneKeyPair 那一處則沒有對應的紅：C34 與 C87(a) 要求的是「�
     M13 = @{
         Desc = '空私鑰檔的訊息退化成 DPAPI 解保護失敗'
         File = 'RunePost\Private\Get-RunePrivateKey.ps1'
-        Old = 'throw "私鑰檔案讀取失敗：$KeyFilePath 是空檔案（0 位元組），沒有任何金鑰內容可讀"'
-        New = 'throw "私鑰檔案讀取失敗：$KeyFilePath 無法以 DPAPI 解保護"   # MUTATION M13'
+        Old = 'throw "Cannot read the private key: $KeyFilePath is an empty file (0 bytes) and holds no key material."'
+        New = 'throw "Cannot read the private key: $KeyFilePath could not be unprotected with DPAPI."   # MUTATION M13'
         MustRed = @('C83')
         MayRed = @()
         Tier = 'Full'
@@ -271,14 +273,15 @@ New-RuneKeyPair 那一處則沒有對應的紅：C34 與 C87(a) 要求的是「�
     M14 = @{
         Desc = '公鑰 PEM 格式無效的訊息退化成一般的載入失敗'
         File = 'RunePost\Private\Get-RunePublicKey.ps1'
-        Old = 'throw "公鑰 PEM 格式無效，無法載入：$($_.Exception.Message)"'
-        New = 'throw "公鑰載入失敗：$($_.Exception.Message)"   # MUTATION M14'
+        Old = 'throw "The recipient public key PEM is not valid and cannot be loaded: $($_.Exception.Message)"'
+        New = 'throw "Cannot load the recipient public key: $($_.Exception.Message)"   # MUTATION M14'
         MustRed = @('C60', 'C62')
         MayRed = @()
         Tier = 'Full'
         Note = @'
 兩條取得公鑰的路徑（~\.rune\public.pem 的內容、-PublicKey 收到的 PEM 字串）都照樣
-被拒。C60 與 C62 同時變紅，證明「PEM 格式無效」這句話在兩條路徑上各被驗了一次。
+被拒。C60 與 C62 同時變紅，證明 public key PEM is not valid 這句話在兩條路徑上
+各被驗了一次。
 C61（-PublicKey 指到不存在的路徑）維持綠色：那是另一個分支，本來就不該受影響。
 '@
     }
@@ -324,13 +327,14 @@ fixture 的負向記憶統一指回 C08。
     M6 = @{
         Desc = '-Unpack 在 GCM tag 驗證失敗時仍繼續往下解包'
         File = 'RunePost\Public\Invoke-RuneOpen.ps1'
-        Old = "        throw '內容驗證失敗（GCM 認證標籤不符）：檔案在傳輸過程中可能被竄改或損壞'"
-        New = "        Write-Warning 'MUTATION M6：忽略 tag 驗證失敗'"
+        Old = "        throw 'Content verification failed (the AES-GCM authentication tag does not match). The ciphertext may have been tampered with or corrupted in transit.'"
+        New = "        Write-Warning 'MUTATION M6: tag mismatch ignored'"
         MustRed = @('C12')
         MayRed = @('C52')
         Note = @'
-錯誤不會消失，而是退化成下游的「Brotli 解壓縮失敗：資料可能已損壞」。C12 因此
-不能只要求訊息落在「內容損壞」這一類，必須點名遭竄改，否則這個缺陷抓不到。
+錯誤不會消失，而是退化成下游的 Brotli decompression failed. The data may be
+corrupted.。C12 因此不能只要求訊息落在「內容損壞」這一類，必須點名遭竄改
+（tampered 這條樣式只認 tamper 與 authentication tag），否則這個缺陷抓不到。
 '@
     }
 

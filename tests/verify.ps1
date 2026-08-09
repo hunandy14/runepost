@@ -279,21 +279,25 @@ function Invoke-Transfer {
 
 $script:Msg = [ordered]@{
     # --- 錯誤環節分類 ---
-    'stage.base64'  = 'base64|Base64|BASE64|編碼|解碼|encod|decod'
-    'stage.format'  = 'magic|RUNE|格式|標頭|檔頭|header|不符|無法辨識|not a valid|不是|無效'
-    'stage.version' = '版本|version|不支援|unsupported|0x0|格式|magic'
-    'stage.key'     = '私鑰|金鑰|key|解鑰|DPAPI|解不開|讀不到|無法讀取|無法解密|not found|decrypt|unprotect'
-    'stage.tag'     = '損壞|竄改|corrupt|tamper|驗證失敗|校驗|完整性|tag|GCM|authentication|內容'
-    'stage.unzip'   = '解壓|解壓縮|decompress|Brotli|brotli|壓縮|zip|ZIP|解包|封存|archive|損壞'
-    'stage.nopub'   = '公鑰|public key|public\.pem'
-    'stage.exists'  = '已存在|存在|exists|Force|覆蓋|overwrite'
-    'stage.nomatch' = '找不到|沒有|未符合|不符合|沒有符合|no file|match|符合|空'
-    'stage.input'   = '找不到|不存在|not found|無效|invalid|路徑|path'
+    'stage.base64'  = 'base64|encod|decod'
+    'stage.format'  = 'magic|RUNE|header|format|not valid|not a valid|invalid|does not match'
+    'stage.version' = 'version|unsupported|0x0|magic|format'
+    'stage.key'     = 'private key|public key|key|DPAPI|passphrase|decrypt|unprotect|not found|cannot find|cannot read'
+    'stage.tag'     = 'corrupt|tamper|authentication|verification|integrity|GCM|tag'
+    'stage.unzip'   = 'decompress|Brotli|compress|zip|extract|archive|corrupt'
+    'stage.nopub'   = 'public key|public\.pem'
+    'stage.exists'  = 'already exists|exists|Force|overwrite'
+    'stage.nomatch' = 'cannot find|no file|nothing to pack|matched no|match|empty'
+    'stage.input'   = 'cannot find|not found|does not exist|not valid|invalid|path'
+    # PowerShell 參數繫結器自己的訊息，隨 host 的 UI 文化而在地化，與本工具的文案
+    # 無關；兩種語系的說法都留著，才不會因為開發機的語系設定而假紅。
     'stage.param'   = 'Parameter set|參數|ParameterBinding|不能同時|互斥|cannot be resolved|Missing an argument|遺失|必要|Mandatory|ParameterArgumentValidation|cannot be found'
-    # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞
-    'stage.unsafe'  = '不安全|逸出|逃逸|穿越|越界|非法路徑|不合法的路徑|路徑不安全|traversal|unsafe|zip.?slip'
+    # 「不安全的封存路徑」必須是獨立語意，不可只用「格式損壞」搪塞。
+    # 這幾個字一個都不會出現在退化後的「Archive format error: <entry>」裡，
+    # 也不會被 ../ ..\ 這類 entry 名稱本身命中。
+    'stage.unsafe'  = 'unsafe|escape|traversal|zip.?slip|outside the destination'
     # 靜態公鑰曲線不符：必須明講 P-256，不能只丟 .NET 原始訊息
-    'stage.curve'   = 'P-?256|prime256|nistP256|曲線'
+    'stage.curve'   = 'P-?256|prime256|nistP256|curve'
 
     # --- 出路指引：錯誤訊息要告訴使用者下一步能做什麼 ---
     'hint.force'         = '-Force'
@@ -304,30 +308,40 @@ $script:Msg = [ordered]@{
     'hint.keyfile'       = 'private\.key'
 
     # --- 具體措辭 ---
-    'notfound'            = '找不到|不存在|not found'
-    'noninteractive'      = '非互動'
-    'passphrase'          = '密碼'
-    # 只寫一個「空」字會被「空白」「空的」這類無關字眼命中，等於樣式失效；
+    'notfound'            = 'cannot find|not found|does not exist'
+    'noninteractive'      = 'non-interactive'
+    'passphrase'          = 'passphrase'
+    # 只寫一個 empty 會被「empty folder」這類無關字眼命中，等於樣式失效；
     # 要求的是「明講這個檔案本身是空的」這句話。
-    'emptyfile'           = '是空檔案|檔案為空|內容為空|空檔案|empty file|file is empty'
+    'emptyfile'           = 'empty file|file is empty|0 bytes'
     'legacymagic'         = 'CTXT'
     'dpapi'               = 'DPAPI'
     'fingerprint'         = 'RUNE-KEY'
-    'pubkey.badpem'       = '公鑰 PEM 格式無效，無法載入'
-    'pubkey.explicitpath' = '-PublicKey 指定的路徑'
-    # 反面用：-PublicKey 指到使用者自己給的路徑時，不該再叫他「複製到本機 <該路徑>」
-    'pubkey.copyhint'     = '複製到本機'
-    'plainkey.format'     = '未加密的 PKCS#8 PEM'
-    'plainkey.warning'    = '任何能讀取此檔案的人'
-    'contenttype'         = '型別|content.?type'
-    'newerversion'        = '較新版本|新版|請更新|update|newer'
-    'tampered'            = '竄改|tamper|認證標籤'
+    'pubkey.badpem'       = 'public key PEM is not valid'
+    'pubkey.explicitpath' = 'specified with -PublicKey'
+    # 反面用：-PublicKey 指到使用者自己給的路徑時，不該再叫他「把 public.pem 複製到
+    # <該路徑>」——他已經指出要去哪找了，缺的是那個檔案，不是「該把檔案放哪」。
+    'pubkey.copyhint'     = "copy 'public\.pem' to"
+    'plainkey.format'     = 'unencrypted PKCS#8 PEM'
+    'plainkey.warning'    = 'Anyone who can read this file'
+    # contenttype / typeorversion 一律寫成「content type」這個完整詞組，不用
+    # 'content' 一個字：GCM 認證失敗的訊息開頭是「Content verification failed」，
+    # 只比對 content 會讓 typeorversion 這條反面樣式無條件命中，C52 就永遠假綠。
+    'contenttype'         = 'content type|content-type'
+    'newerversion'        = 'newer version|update|newer'
+    # tampered 與 typeorversion 必須互不包含：前者只認 tamper 與 authentication tag，
+    # 後者只認 content type / newer version / unsupported，兩組字在兩則訊息裡各自
+    # 只出現在自己那一則。
+    'tampered'            = 'tamper|authentication tag'
     # 反面用：contentType 被竄改時不得被說成「型別不支援 / 版本較新」
-    'typeorversion'       = '型別|content.?type|較新版本|不支援'
-    'wildcard.skipdir'    = 'WARNING|警告|略過|跳過|不遞迴|skip'
+    'typeorversion'       = 'content type|content-type|newer version|unsupported'
+    'wildcard.skipdir'    = 'WARNING|skipped|not recursive'
     # 私鑰／公鑰不得整份印到畫面上
     'pem.privateblock'    = '-----BEGIN[A-Z ]*PRIVATE KEY-----'
     'pem.publicblock'     = '-----BEGIN PUBLIC KEY-----'
+    # PowerShell 的 -WhatIf 預演行是框架輸出，隨 host 的 UI 文化在地化，兩種語系
+    # 的說法都留著。與本工具的文案無關。
+    'whatif.line'         = 'What if|如果'
     # 反面用：PowerShell 錯誤記錄框架的痕跡。入口腳本以 [Console]::Error.WriteLine
     # 印例外訊息本身，這些標記一個都不該出現在 stderr。純否定樣式，因此在地化的
     # 說法沒被列進來也不會造成誤判。
@@ -2525,7 +2539,7 @@ Invoke-TCase 'C42' 'wildcard 命中子目錄：須出聲警告，且解包後不
     Assert (@($files.Keys | Where-Object { $_ -match '(^|/)top\.txt$' }).Count -eq 1) ('top.txt 未正確還原：' + (($files.Keys) -join ','))
     Assert (-not ($files.Keys | Where-Object { $_ -match 'inside\.txt' })) '違反不遞迴：子目錄內的檔案被打包了'
     Assert ($dirs.Count -eq 0) ('解包後留下空目錄（不遞迴就不該產生目錄項目）：' + (($dirs | ForEach-Object { Split-Path -Leaf $_ }) -join ','))
-    $warn = ($p.All -split "`r?`n" | Where-Object { $_ -match 'WARNING|警告|略過|跳過' } | Select-Object -First 1)
+    $warn = ($p.All -split "`r?`n" | Where-Object { $_ -match (Get-MsgPattern 'wildcard.skipdir') } | Select-Object -First 1)
     return ('已警告且只還原 top.txt、無空目錄；warn=' + (Squash $warn 70))
 }
 
@@ -3161,7 +3175,7 @@ $e = Export-RunePrivateKey -OutFilePath $env:RUNE_OUTKEY -KeyFilePath $env:RUNE_
     Assert (-not [System.IO.File]::Exists($sb.PubPath)) "-WhatIf 竟產生了公鑰：$($sb.PubPath)"
     Assert (-not [System.IO.File]::Exists($outKey)) "-WhatIf 竟產生了匯出檔：$outKey"
     Assert (-not [System.IO.Directory]::Exists((Join-Path $sb.Path '.rune'))) '-WhatIf 竟建立了 .rune 資料夾'
-    $whatIfLines = @(($r.StdOut -split "`r?`n") | Where-Object { $_ -match 'What if|如果' }).Count
+    $whatIfLines = @(($r.StdOut -split "`r?`n") | Where-Object { $_ -match (Get-MsgPattern 'whatif.line') }).Count
     Assert ($whatIfLines -ge 2) ('兩條路徑應各印一行 What if 說明，實得 {0} 行：{1}' -f $whatIfLines, (Squash $r.StdOut 200))
     return ('兩條破壞性路徑帶 -WhatIf：皆未回傳結果物件、沙箱沒有 .rune、沒有匯出檔，並各印出一行預演說明')
 }
