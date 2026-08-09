@@ -1243,24 +1243,18 @@ function New-TestKeyPair {
     }
 }
 
-# 金鑰對素材要「可用」才算建立成功：少了私鑰檔或載不進來的公鑰，後續每一案都只會
-# 表現成下游症狀。在 producer 這一層就失敗，原因才會落在負責產生金鑰的那一案上。
-function New-TestKeyFixture {
-    param([string]$Name, [string]$Protect)
-    $k = if ($Protect) { New-TestKeyPair -Name $Name -Protect $Protect } else { New-TestKeyPair -Name $Name }
-    Assert ($k.HasKey) ('-GenerateKeys 未產生私鑰檔：' + (Squash $k.Result.All 200))
-    Assert ($null -ne $k.PubSpki) ('-GenerateKeys 未產生可載入的 public.pem：' + (Squash $k.Result.All 200))
-    return $k
-}
-
+# 金鑰對 producer 刻意不對「素材是否完整」下斷言：私鑰在但公鑰不在（或反過來）時，
+# 只用得到其中一半的案例仍然應該照跑並給出各自的結論。素材缺什麼由用得到那一半的
+# 案例自己說，這才留得住「哪些案例不受影響」這個資訊。
+#
 # 主測試金鑰 A 與備用金鑰 B 固定以 -Protect Dpapi 產生。其後絕大多數案例都用金鑰 A
 # 解密，因此整套案例同時就是「DPAPI 私鑰仍然可用」的回歸保護。
-Register-Fixture 'KeyA' { return (New-TestKeyFixture -Name 'A' -Protect 'Dpapi') }
-Register-Fixture 'KeyB' { return (New-TestKeyFixture -Name 'B' -Protect 'Dpapi') }
+Register-Fixture 'KeyA' { return (New-TestKeyPair -Name 'A' -Protect 'Dpapi') }
+Register-Fixture 'KeyB' { return (New-TestKeyPair -Name 'B' -Protect 'Dpapi') }
 
 # 三種私鑰儲存格式各一把，供格式與權限案例使用
-Register-Fixture 'KeyProtNone' { return (New-TestKeyFixture -Name 'pnone') }
-Register-Fixture 'KeyProtDpapi' { return (New-TestKeyFixture -Name 'pdpapi' -Protect 'Dpapi') }
+Register-Fixture 'KeyProtNone' { return (New-TestKeyPair -Name 'pnone') }
+Register-Fixture 'KeyProtDpapi' { return (New-TestKeyPair -Name 'pdpapi' -Protect 'Dpapi') }
 
 # 密碼保護案例共用的密碼。含空白、非 ASCII 與符號，順帶涵蓋 SecureString 經環境
 # 變數傳入子行程後仍逐字相符（密碼錯一個字元就解不開，等於同時是編碼測試）。
