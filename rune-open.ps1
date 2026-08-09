@@ -1,113 +1,140 @@
 ﻿#Requires -Version 7.4
 <#
 .SYNOPSIS
-    密文傳輸工具（解密端 + 金鑰管理）— 兩台自有 Windows 機器間，經公開純文字管道（論壇/pastebin）單向傳檔。
+    runepost decrypting side and key management. Sends files one way between two Windows machines you own, over a public plain-text channel such as a forum post or a pastebin.
 
 .DESCRIPTION
-    流程：文字解碼（Base64）→ 解密（ECDH P-256 + HKDF-SHA256 派生 AES-256-GCM 金鑰）→
-    解壓（Brotli）→ 解包（ZIP/store）。純 .NET 內建類別實作，零外部依賴，全程記憶體操作。
+    The pipeline is decode (Base64) -> decrypt (AES-256-GCM with a key derived from
+    ephemeral ECDH P-256 and HKDF-SHA256) -> decompress (Brotli) -> extract (ZIP, store).
+    Everything is built on the .NET base class library, with no external dependencies, and
+    all work happens in memory.
 
-    私鑰存於 ~\.rune\private.key，靜態保護方式由 -GenerateKeys -Protect 決定，共三種：
-    None（預設，未加密的 PKCS#8 PEM）、Passphrase（密碼保護的 PKCS#8 PEM）、
-    Dpapi（DPAPI CurrentUser 位元組，僅本機本帳號可解）。解密端讀取私鑰時由檔案內容
-    自動判別格式，三種格式共用同一個路徑，不需指定。
+    The private key is stored at ~\.rune\private.key. Its protection mode is chosen with
+    -GenerateKeys -Protect and has three values: None (the default, an unencrypted PKCS#8
+    PEM), Passphrase (a passphrase-protected PKCS#8 PEM), and Dpapi (DPAPI CurrentUser
+    bytes, readable only on this machine under this Windows account). All three modes share
+    the same path, and the format is detected from the file content, so it never has to be
+    specified when reading the key.
 
-    選擇取捨：密文張貼到公開管道後即為永久存在，而私鑰是唯一的還原手段——私鑰遺失
-    等同所有歷來密文永久無法解密。Dpapi 的靜態保護最強，但綁定本機與本 Windows 帳號，
-    重灌或換帳號後即無法還原，也無法備份。None 與 Passphrase 為標準 PKCS#8，可複製到
-    離線媒體保存。預設 None 即是以可攜與可備份為優先；選擇 None 時，任何能讀取
-    private.key 的人都能解開所有以對應公鑰加密的密文。
+    The trade-off behind the default: ciphertext posted to a public channel is permanent,
+    and the private key is the only way to recover it, so losing the private key makes every
+    past ciphertext permanently unreadable. Dpapi offers the strongest protection at rest,
+    but it binds the file to this machine and this Windows account: after a reinstall or an
+    account change the key cannot be read, and it cannot be backed up. None and Passphrase
+    are standard PKCS#8 and can be copied to offline media. The default of None puts
+    portability and backup ahead of encryption at rest. With None, anyone who can read
+    private.key can decrypt every ciphertext encrypted to the matching public key.
 
-    公鑰同時寫到 ~\.rune\public.pem，請把這個檔案交給加密端（rune-seal.ps1），
-    放到該機器的 ~\.rune\public.pem（或用 -PublicKey 指定其他路徑／直接傳入
-    PEM 字串本體）。
+    The public key is written to ~\.rune\public.pem at the same time. Transfer that file to
+    the encrypting machine (rune-seal.ps1) and place it at ~\.rune\public.pem there, or
+    point -PublicKey at another location or pass the PEM content itself.
 
-    既有私鑰可用 -ExportPrivateKey 匯出成可備份的 PKCS#8 PEM，來源包含 DPAPI 私鑰；
-    這是把 DPAPI 私鑰離機保存的唯一途徑。
+    An existing private key can be exported as a backup PKCS#8 PEM with -ExportPrivateKey.
+    A DPAPI private key is a valid source, and this is the only way to keep a copy of a
+    DPAPI private key off the machine.
 
-    -GenerateKeys 若偵測到 ~\.rune\private.key 已存在，不會直接覆蓋：互動環境下
-    會先印出現有金鑰的指紋，再以 PowerShell 標準的確認提示詢問是否產生新金鑰
-    （選項 Y／A／N／L／S，預設為 Y，直接按 Enter 即繼續；不要繼續請明確選 N。
-    安全性來自舊金鑰改名保留而不是刪除，不依賴提示的預設值）；一旦確認（或帶
-    -Force 跳過提示），
-    會先把舊的 private.key／public.pem 改名為同一時間戳的 .bak 檔（不是刪除），
-    才產生並寫入新金鑰對。舊私鑰仍在，只是換了副檔名，用 -KeyFile 指向備份路徑
-    即可繼續解密用舊公鑰加密的密文；但比對指紋仍然重要——確認要換的是哪一把，
-    因為換過之後加密端預設用的公鑰就不同了。非互動環境（例如排程工作、管道輸入
-    被重導向）一律直接拒絕，不會卡在提示；此時請改用 -Force，或手動處理
-    private.key 後重新執行。
+    When -GenerateKeys finds an existing ~\.rune\private.key, it does not overwrite it. In
+    an interactive session it prints the fingerprint of the existing key and then asks for
+    confirmation through the standard PowerShell prompt (options Y, A, N, L, S; the default
+    is Y, so pressing Enter continues; select N to stop). The safety of this path comes from
+    the old key pair being renamed rather than deleted, not from the default answer. Once
+    confirmed, or when -Force skips the prompt, the existing private.key and public.pem are
+    renamed to .bak files that share one timestamp, and only then is the new key pair
+    created and written. The old private key still exists under the new name: point -KeyFile
+    at the backup path to keep decrypting ciphertext encrypted to the old public key.
+    Comparing fingerprints still matters, because after a rotation the encrypting side uses
+    a different public key by default. A non-interactive session, such as a scheduled task
+    or a run with standard input redirected, is refused outright rather than waiting at the
+    prompt. Specify -Force, or move private.key aside and run the command again.
 
-    成功輸出只印路徑與指紋，不印出公鑰 PEM 全文；要看 PEM 內容請自行執行
-    Get-Content ~\.rune\public.pem。
+    Successful output prints paths and fingerprints only, never the public key PEM in full.
+    To read the PEM, run Get-Content ~\.rune\public.pem.
 
 .PARAMETER Protect
-    搭配 -GenerateKeys：私鑰的靜態保護方式，None（預設）／Passphrase／Dpapi。
-    搭配 -ExportPrivateKey：匯出檔的格式，None（預設）／Passphrase；不支援 Dpapi，
-    因為 DPAPI 檔案在其他機器或帳號無法還原，不具備份用途。
+    With -GenerateKeys: the protection mode of the private key at rest, one of None (the
+    default), Passphrase, or Dpapi.
+    With -ExportPrivateKey: the format of the exported file, either None (the default) or
+    Passphrase. Dpapi is not supported, because a DPAPI file cannot be read on another
+    machine or account and does not serve as a backup.
 
 .PARAMETER Passphrase
-    密碼保護的 PKCS#8 PEM 所需的密碼，型別為 SecureString。搭配 -GenerateKeys
-    -Protect Passphrase 時是新私鑰的密碼；搭配 -Unpack／-ExportPublicKey／
-    -ExportPrivateKey 時是「讀取來源私鑰」的密碼。未提供時於互動環境詢問；
-    非互動環境（標準輸入已重新導向）一律直接報錯，不會卡在提示。
+    The passphrase for a passphrase-protected PKCS#8 PEM, as a SecureString. With
+    -GenerateKeys -Protect Passphrase it is the passphrase for the new private key. With
+    -Unpack, -ExportPublicKey, or -ExportPrivateKey it is the passphrase of the source
+    private key. When it is not supplied, an interactive session prompts for it. A
+    non-interactive session, where standard input is redirected, reports an error instead of
+    waiting at the prompt.
 
 .PARAMETER OutPassphrase
-    搭配 -ExportPrivateKey -Protect Passphrase：匯出檔的密碼，型別為 SecureString。
-    與 -Passphrase 分開，因為來源私鑰與匯出檔是兩個各自獨立的密碼。
+    With -ExportPrivateKey -Protect Passphrase: the passphrase for the exported file, as a
+    SecureString. It is separate from -Passphrase because the source private key and the
+    exported file have independent passphrases.
 
 .PARAMETER OutFile
-    搭配 -ExportPrivateKey：匯出檔的輸出路徑，必填。已存在時拒絕覆蓋，需加 -Force。
+    With -ExportPrivateKey: the output path of the exported file. Required. An existing file
+    is not overwritten unless -Force is specified.
 
 .PARAMETER KeyFile
-    來源私鑰的路徑，預設 ~\.rune\private.key。三種儲存格式皆由內容自動判別。
+    The path of the source private key. The default is ~\.rune\private.key. All three
+    storage formats are detected from the file content.
 
 .PARAMETER Force
-    搭配 -GenerateKeys：當 ~\.rune\private.key 已存在時，略過確認提示直接產生
-    新金鑰（舊金鑰仍會改名保留為 .bak 檔，不會刪除）。
-    搭配 -ExportPrivateKey：略過確認提示，並允許覆蓋已存在的 -OutFile。
-    兩者皆供非互動情境（腳本、排程）使用。
+    With -GenerateKeys: skip the confirmation prompt when ~\.rune\private.key already exists
+    and create a new key pair. The existing key pair is still renamed to .bak files rather
+    than deleted.
+    With -ExportPrivateKey: skip the confirmation prompt and allow an existing -OutFile to be
+    overwritten.
+    Both are intended for non-interactive use, such as scripts and scheduled tasks.
 
 .EXAMPLE
     .\rune-open.ps1 -GenerateKeys
-    產生 ECDH P-256 金鑰對：私鑰以未加密的 PKCS#8 PEM 存到 ~\.rune\private.key，
-    公鑰同時寫到 ~\.rune\public.pem，畫面印出兩者路徑與公鑰指紋，並警告私鑰未加密。
-    若 private.key 已存在，會先印出現有指紋並詢問是否繼續（PowerShell 標準確認提示，
-    預設為繼續，不要繼續請選 N）；確認後舊金鑰
-    會改名保留為 private.key.bak-<時間戳>（與對應的 public.pem.bak-<時間戳>），
-    舊密文仍可用 -KeyFile 指向備份路徑解密。
+    Creates an ECDH P-256 key pair. The private key is written to ~\.rune\private.key as an
+    unencrypted PKCS#8 PEM, the public key is written to ~\.rune\public.pem, both paths and
+    the public key fingerprint are printed, and a warning states that the private key is not
+    encrypted. If private.key already exists, the fingerprint of the existing key is printed
+    first and confirmation is requested through the standard PowerShell prompt, whose default
+    answer continues; select N to stop. After confirmation the old key pair is renamed to
+    private.key.bak-<timestamp> and public.pem.bak-<timestamp>, and existing ciphertext can
+    still be decrypted by pointing -KeyFile at the backup path.
 
 .EXAMPLE
     .\rune-open.ps1 -GenerateKeys -Protect Passphrase
-    產生金鑰對，私鑰以密碼保護的 PKCS#8 PEM 存放。密碼於畫面詢問並要求輸入兩次確認；
-    非互動環境請改以 -Passphrase (Read-Host -AsSecureString) 傳入。
+    Creates a key pair and stores the private key as a passphrase-protected PKCS#8 PEM. The
+    passphrase is requested on screen and must be entered twice. In a non-interactive
+    session, pass it with -Passphrase (Read-Host -AsSecureString).
 
 .EXAMPLE
     .\rune-open.ps1 -GenerateKeys -Protect Dpapi
-    產生金鑰對，私鑰以 DPAPI（CurrentUser）保護。此檔只有同一台機器、同一個 Windows
-    帳號解得開，無法複製備份；請一併規劃 -ExportPrivateKey 的備份流程。
+    Creates a key pair and protects the private key with DPAPI (CurrentUser). The file can be
+    read only on this machine under this Windows account and cannot be backed up by copying.
+    Plan a backup with -ExportPrivateKey at the same time.
 
 .EXAMPLE
     .\rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem
-    把 ~\.rune\private.key 匯出成未加密的 PKCS#8 PEM 備份，來源為 DPAPI 私鑰時同樣適用。
-    匯出前會顯示來源、輸出路徑與格式並要求確認（-Force 略過）。匯出檔可用
-    -KeyFile 指向它來解密，請存放於能控制存取權的離線媒體。
+    Exports ~\.rune\private.key as an unencrypted PKCS#8 PEM backup. A DPAPI private key is a
+    valid source. The source, the output path, and the format are shown and confirmation is
+    requested; -Force skips the prompt. Point -KeyFile at the exported file to decrypt with
+    it, and keep it on offline media whose access you control.
 
 .EXAMPLE
     .\rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem -Protect Passphrase
-    匯出成密碼保護的 PKCS#8 PEM。匯出檔的密碼於畫面詢問並要求輸入兩次確認，
-    非互動環境請以 -OutPassphrase 傳入 SecureString。
+    Exports a passphrase-protected PKCS#8 PEM. The passphrase for the exported file is
+    requested on screen and must be entered twice. In a non-interactive session, pass a
+    SecureString with -OutPassphrase.
 
 .EXAMPLE
     .\rune-open.ps1 -ExportPublicKey
-    從既有的 ~\.rune\private.key 重新導出公鑰，覆寫 ~\.rune\public.pem 並印出
-    路徑與指紋。public.pem 遺失時用這個補回來，也可以拿來隨時再看一次自己的指紋。
+    Re-exports the public key from the existing ~\.rune\private.key, overwrites
+    ~\.rune\public.pem, and prints the paths and the fingerprint. Use it to restore a lost
+    public.pem, or to print the fingerprint again at any time.
 
 .EXAMPLE
     .\rune-open.ps1 -Unpack report.docx.txt -Destination C:\out
-    在持有私鑰的機器上解密還原檔案。-Unpack 與 -Destination 皆可省略參數名稱、
-    依序放位置（.\rune-open.ps1 report.docx.txt C:\out），與 rune-seal.ps1 的
-    .\rune-seal.ps1 <路徑> 用法一致。私鑰為密碼保護的 PKCS#8 PEM 時會詢問密碼，
-    非互動環境請以 -Passphrase 傳入。
+    Decrypts and restores files on the machine that holds the private key. -Unpack and
+    -Destination can also be given positionally, as in
+    .\rune-open.ps1 report.docx.txt C:\out, matching the .\rune-seal.ps1 <path> form. When
+    the private key is a passphrase-protected PKCS#8 PEM, the passphrase is requested. In a
+    non-interactive session, pass it with -Passphrase.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Unpack')]
 # 本腳本是 CLI 入口，職責就是把模組回傳的結果印給使用者看。Write-Host 在這裡是
@@ -180,13 +207,13 @@ function Show-RuneKeySummary {
         [string] $BackupKeyFilePath
     )
     Write-Host $Title
-    $keyLine = "  私鑰  $KeyFilePath"
+    $keyLine = "  Private key  $KeyFilePath"
     if ($KeyFileNote) { $keyLine += "   ($KeyFileNote)" }
     Write-Host $keyLine
-    Write-Host "  公鑰  $PublicKeyFilePath"
-    Write-Host ('  指紋  RUNE-KEY {0}' -f $Fingerprint)
+    Write-Host "  Public key   $PublicKeyFilePath"
+    Write-Host ('  Fingerprint  RUNE-KEY {0}' -f $Fingerprint)
     if ($BackupKeyFilePath) {
-        Write-Host "  備份  $BackupKeyFilePath"
+        Write-Host "  Backup       $BackupKeyFilePath"
     }
 }
 
@@ -218,23 +245,23 @@ try {
             $result = New-RuneKeyPair -Protect $Protect -Passphrase $Passphrase -Force:$Force `
                 -WarningVariable keyWarnings -WarningAction SilentlyContinue
             if ($result) {
-                Show-RuneKeySummary -Title "已產生 ECDH P-256 金鑰對（私鑰保護方式：$($result.ProtectNote)）" `
+                Show-RuneKeySummary -Title "Created an ECDH P-256 key pair. Private key protection: $($result.ProtectNote)." `
                     -KeyFilePath $result.KeyFile -KeyFileNote $result.ProtectNote `
                     -PublicKeyFilePath $result.PublicKeyFile -Fingerprint $result.Fingerprint `
                     -BackupKeyFilePath $result.BackupKeyFile
             }
             else {
-                Write-Host '已取消，未變更任何檔案。'
+                Write-Host 'Cancelled. No files were changed.'
             }
             Show-RuneDeferredWarning -Warnings $keyWarnings
         }
         'ExportPublicKey' {
             $result = Export-RunePublicKey -KeyFilePath $KeyFile -Passphrase $Passphrase
             if (-not $result.IsDefaultKey) {
-                Write-Host "使用了非預設私鑰：$($result.KeyFile)"
-                Write-Host "公鑰已寫到同目錄，未動到預設的 $($result.DefaultPublicKeyFile)。"
+                Write-Host "Used a non-default private key: $($result.KeyFile)"
+                Write-Host "The public key was written to the same folder. $($result.DefaultPublicKeyFile) was not changed."
             }
-            Show-RuneKeySummary -Title '已重新導出公鑰' -KeyFilePath $result.KeyFile `
+            Show-RuneKeySummary -Title 'Re-exported the public key.' -KeyFilePath $result.KeyFile `
                 -PublicKeyFilePath $result.PublicKeyFile -Fingerprint $result.Fingerprint
         }
         'ExportPrivateKey' {
@@ -248,21 +275,21 @@ try {
                 -Passphrase $Passphrase -OutPassphrase $OutPassphrase -Force:$Force @confirmArg `
                 -WarningVariable keyWarnings -WarningAction SilentlyContinue
             if ($result) {
-                Write-Host "已匯出私鑰（格式：$($result.ProtectNote)）"
-                Write-Host "  來源  $($result.SourceKeyFile)"
-                Write-Host "  輸出  $($result.OutFile)"
-                Write-Host ('  指紋  RUNE-KEY {0}' -f $result.Fingerprint)
-                Write-Host "還原方式：rune-open.ps1 -Unpack <密文檔> -Destination <目的資料夾> -KeyFile $($result.OutFile)"
+                Write-Host "Exported the private key. Format: $($result.ProtectNote)."
+                Write-Host "  Source       $($result.SourceKeyFile)"
+                Write-Host "  Output       $($result.OutFile)"
+                Write-Host ('  Fingerprint  RUNE-KEY {0}' -f $result.Fingerprint)
+                Write-Host "To decrypt with this backup: rune-open.ps1 -Unpack <ciphertext file> -Destination <destination folder> -KeyFile $($result.OutFile)"
             }
             else {
-                Write-Host '已取消，未變更任何檔案。'
+                Write-Host 'Cancelled. No files were changed.'
             }
             Show-RuneDeferredWarning -Warnings $keyWarnings
         }
         'Unpack' {
             $result = Invoke-RuneOpen -InFilePath $Unpack -DestinationPath $Destination `
                 -KeyFilePath $KeyFile -Passphrase $Passphrase
-            Write-Host "解密完成，檔案已還原至：$($result.Destination)"
+            Write-Host "Decryption complete. Files were restored to: $($result.Destination)"
         }
     }
 }

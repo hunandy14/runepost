@@ -1,30 +1,36 @@
 ﻿#Requires -Version 7.4
 <#
 .SYNOPSIS
-    密文傳輸工具（加密端）— 兩台自有 Windows 機器間，經公開純文字管道（論壇/pastebin）單向傳檔。
+    runepost encrypting side. Sends files one way between two Windows machines you own, over a public plain-text channel such as a forum post or a pastebin.
 
 .DESCRIPTION
-    流程：打包（ZIP/store）→ 壓縮（Brotli）→ 加密（ECDH P-256 + HKDF-SHA256 派生 AES-256-GCM 金鑰）→ 文字編碼（Base64）。
-    純 .NET 內建類別實作，零外部依賴，全程記憶體操作，不經 PowerShell 管道。
+    The pipeline is pack (ZIP, store) -> compress (Brotli) -> encrypt (AES-256-GCM with a key derived from ephemeral ECDH P-256 and HKDF-SHA256) -> encode (Base64).
+    Everything is built on the .NET base class library, with no external dependencies. All work happens in memory and never touches the PowerShell pipeline.
 
-    公鑰不內嵌在腳本裡，執行時才從 ~\.rune\public.pem 讀取（或以 -PublicKey 指定）。
-    因此本腳本是與金鑰無關的通用工具，任何人取得後配上自己的 public.pem 即可使用。
-    金鑰的產生與管理請在解密端使用 rune-open.ps1。
+    The recipient public key is not embedded in this script. It is read at run time from
+    ~\.rune\public.pem, or from the location given by -PublicKey. This script is therefore
+    a key-independent general tool: anyone can use it with their own public.pem.
+    Create and manage key pairs on the decrypting machine with rune-open.ps1.
 
-    加密端只使用收件人公鑰，與解密端私鑰的儲存格式（rune-open.ps1 -GenerateKeys
-    -Protect 的 None／Passphrase／Dpapi）無關，本腳本的用法不因該選擇而改變。
-    密文張貼到公開管道後即為永久存在，而收件人私鑰是唯一的還原手段；請確認收件人
-    已備妥私鑰備份（rune-open.ps1 -ExportPrivateKey），再開始傳送密文。
+    The encrypting side uses the recipient public key only. It is unaffected by the
+    protection mode of the recipient private key (None, Passphrase, or Dpapi, chosen with
+    rune-open.ps1 -GenerateKeys -Protect).
+    Ciphertext posted to a public channel is permanent, and the recipient private key is
+    the only way to recover it. Confirm that the recipient holds a private key backup
+    (rune-open.ps1 -ExportPrivateKey) before sending any ciphertext.
 
 .EXAMPLE
     .\rune-seal.ps1 C:\data\report.docx
-    把收件人的 public.pem 放到本機 ~\.rune\public.pem 後，將單一檔案打包、壓縮、加密
-    並輸出成 report.docx.txt。每次執行都會先印出所用公鑰的指紋，請與解密端核對。
+    Packs, compresses, and encrypts a single file into report.docx.txt, using the
+    recipient public key at ~\.rune\public.pem. Every run first prints the fingerprint of
+    the public key in use. Compare it with the fingerprint on the decrypting machine.
 
 .EXAMPLE
     .\rune-seal.ps1 C:\data\report.docx -PublicKey D:\keys\alice.pem
-    用指定路徑的公鑰檔加密。-PublicKey 也接受 PEM 字串本體（字串含 -----BEGIN 即視為
-    內容而非路徑）；多行 PEM 請用變數或 here-string 帶入，不要直接打在命令列上。
+    Encrypts with the public key file at the given path. -PublicKey also accepts the PEM
+    content itself: a string containing -----BEGIN is treated as content rather than as a
+    path. Pass a multi-line PEM through a variable or a here-string rather than typing it
+    on the command line.
 #>
 [CmdletBinding()]
 # 本腳本是 CLI 入口，職責就是把模組回傳的結果印給使用者看。Write-Host 在這裡是
@@ -68,10 +74,10 @@ try {
         -ForceOverwrite:$Force -InformationAction Continue
 
     Write-Host ''
-    Write-Host "完成：$($result.OutFile)"
-    Write-Host ('原始（打包後、壓縮前）: {0:N0} bytes' -f $result.OriginalSize)
-    Write-Host ('壓縮後（Brotli）       : {0:N0} bytes' -f $result.CompressedSize)
-    Write-Host ('Base64 後（輸出檔）    : {0:N0} bytes' -f $result.Base64Size)
+    Write-Host "Done: $($result.OutFile)"
+    Write-Host ('Packed, before compression : {0:N0} bytes' -f $result.OriginalSize)
+    Write-Host ('Compressed with Brotli     : {0:N0} bytes' -f $result.CompressedSize)
+    Write-Host ('Base64 output file         : {0:N0} bytes' -f $result.Base64Size)
 }
 catch {
     # 用 [Console]::Error.WriteLine 直接印例外訊息本身，不用 Write-Error——
