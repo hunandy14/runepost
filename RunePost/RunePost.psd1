@@ -7,7 +7,7 @@
     PowerShellVersion = '7.4'
 
     # 明確清單，絕不用 '*'：萬用字元會讓模組自動載入器為了做命令探索而解析整個
-    # 模組，是有實測效能代價的。新增對外函式時必須同步更新這份清單。
+    # 模組，是有效能代價的。新增對外函式時必須同步更新這份清單。
     FunctionsToExport = @(
         'Invoke-RuneSeal'
         'Invoke-RuneOpen'

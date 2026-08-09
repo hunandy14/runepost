@@ -11,7 +11,7 @@ function Get-RunePackPlan {
 
     if ($PackPath -match '[*?]') {
         # --- wildcard：Get-Item 展開，僅當層不遞迴。wildcard 命中的子目錄一律
-        #     略過並警告（不遞迴打包目錄），不再靜默把目錄當空 entry 塞進封存包。
+        #     略過並警告，不遞迴打包，也不把目錄當成空 entry 塞進封存包。
         $items = @(Get-Item -Path $PackPath -ErrorAction SilentlyContinue)
         if ($items.Count -eq 0) {
             throw "找不到符合萬用字元的項目：$PackPath"

@@ -1514,7 +1514,7 @@ Write-Host '-- 前置 --' -ForegroundColor Cyan
 Invoke-TCase 'P0' '模組結構自洽：可載入、manifest 匯出清單與 Public\ 檔名一致' -Tier Core {
     <#
         psd1 的 FunctionsToExport 是明確清單而非 '*'（萬用字元會讓模組自動載入器為
-        命令探索解析整個模組，有實測效能代價）。代價是新增／改名對外函式時必須手動
+        命令探索解析整個模組，有效能代價）。代價是新增／改名對外函式時必須手動
         同步這份清單，忘了同步的後果是「函式存在但呼叫不到」或「清單列了不存在的
         函式」。這一案守的就是這個漂移風險，排在最前面：沒過就不必往下測。
 
@@ -3016,8 +3016,8 @@ Invoke-TCase 'C82' '-ExportPrivateKey 原子寫入：正常路徑不留 .tmp-* �
     return ('連續匯出 2 次（含 -Force 覆蓋），資料夾只剩 1 個完整可載入的 PEM，無 .tmp-* 殘留')
 }
 
-# 兩個破壞性動作（產生金鑰會改名既有金鑰、匯出私鑰會多一份私鑰落地）改用
-# SupportsShouldProcess 之後，-WhatIf / -Confirm / -Force 三者的界線要各自釘死。
+# 兩個破壞性動作（產生金鑰會改名既有金鑰、匯出私鑰會多一份私鑰落地）以
+# SupportsShouldProcess 實作確認，-WhatIf / -Confirm / -Force 三者的界線各自釘死。
 # 這三案一律以模組身分執行：-WhatIf 與 -Confirm 是 common parameters，入口腳本沒有
 # 宣告 SupportsShouldProcess，命令列上沒有這兩個開關。
 

@@ -68,7 +68,7 @@ $script:Verify = Join-Path $script:TestsDir 'verify.ps1'
 # 守護檔一律放在 repo 內的固定位置，不跟著 -WorkRoot 走：它們要能被「拿到這份
 # repo 的人」看見，而不是被藏在某個自訂工作目錄裡。
 #   RUNNING    執行期間存在，宣告本 repo 正處於「可能已植入缺陷」的中間狀態
-#   .inflight  植入期間保存目標檔案的原始位元組，供被中斷後的下一輪自動還原
+#   .inflight  植入期間保存目標檔案的原始位元組，供被中斷後由下一次執行自動還原
 $script:GuardDir = Join-Path $script:TestsDir '_mutwork'
 $script:LockFile = Join-Path $script:GuardDir 'RUNNING'
 $script:InflightDir = Join-Path $script:GuardDir '.inflight'
@@ -101,7 +101,7 @@ $script:Catalog = [ordered]@{
         MustRed = @()
         MayRed = @()
         Note = @'
-本項預期「不紅」，收錄它是為了把這個結論留在版控裡。
+本項預期「不紅」，收錄的目的是把這個結論明確記錄在變異目錄裡。
 Expand-RuneZip 有兩道路徑檢查：(a) entry 名稱含反斜線一律拒絕；(b) 正規化後
 要求仍在目的資料夾內。(b) 涵蓋 (a) 的全部輸入，所以只拿掉 (a) 之後外部行為
 完全相同，只有錯誤措辭從「entry 名稱含反斜線」變成「跳脫目的資料夾」。這在
@@ -364,11 +364,10 @@ fixture 的負向記憶統一指回 C08。
         MustRed = @('C87')
         MayRed = @()
         Note = @'
-這正是獨立審查抓到的缺陷形狀：呼叫端 session 只要有 $ConfirmPreference = 'None'
-（自動化 profile 常見），ShouldProcess 與疊在它外面的非互動防呆會一起失效，已有
-金鑰又沒帶 -Force 也會靜默輪替並 exit 0。C34 對這個缺陷咬不動——它跑在
-$ConfirmPreference 預設值 High 之下，看不出「偏好被繼承」這件事，因此必須另有
-C87 專門走 None 這條路徑。
+缺陷的形狀是：呼叫端 session 只要有 $ConfirmPreference = 'None'（自動化 profile
+常見），ShouldProcess 與疊在它外面的非互動防呆會一起失效，已有金鑰又沒帶 -Force
+也會靜默輪替並 exit 0。C34 對這個缺陷咬不動——它跑在 $ConfirmPreference 預設值
+High 之下，看不出「偏好被繼承」這件事，因此必須另有 C87 專門走 None 這條路徑。
 '@
     }
 }
@@ -410,7 +409,7 @@ function Get-ProductHash {
 #
 # 執行期間 repo 裡的產品程式碼隨時可能是被植入缺陷的版本。RUNNING 這個 lock 檔
 # 就是給人與工具看的旗標：看到它就代表現在讀到／複製到的程式碼不可信。
-# 植入期間另外把目標檔案的原始位元組留在 .inflight，行程被強制中斷時下一輪啟動
+# 植入期間另外把目標檔案的原始位元組留在 .inflight，行程被強制中斷時，下一次啟動
 # 會自動還原。
 # ==============================================================================
 
@@ -445,7 +444,7 @@ function Clear-Inflight {
     }
 }
 
-# 啟動時先處理上一輪被強制中斷留下的殘骸。無論走哪條路徑都會清掉 lock 與
+# 啟動時先處理上一次執行被強制中斷所留下的殘骸。無論走哪條路徑都會清掉 lock 與
 # .inflight，因此任何入口（含 -List）都可以、也應該先呼叫這個函式。
 function Restore-InterruptedRun {
     $meta = Join-Path $script:InflightDir 'target.txt'
@@ -459,14 +458,14 @@ function Restore-InterruptedRun {
         for ($i = 1; $i -lt $lines.Count; $i++) {
             $path = $lines[$i]
             $bin = Join-Path $script:InflightDir ("original_{0}.bin" -f ($i - 1))
-            Write-Host "偵測到上一輪未還原的變異 $name，正在還原：$path" -ForegroundColor Yellow
+            Write-Host "偵測到上一次執行未還原的變異 $name，正在還原：$path" -ForegroundColor Yellow
             [System.IO.File]::WriteAllBytes($path, [System.IO.File]::ReadAllBytes($bin))
         }
         Write-Host '已還原。' -ForegroundColor Yellow
     }
     elseif ($hasLock) {
         Write-Host ''
-        Write-Host '偵測到上一輪的執行標記但沒有待還原的檔案（中斷發生在植入之前或還原之後），清除標記。' -ForegroundColor Yellow
+        Write-Host '偵測到上一次執行的標記但沒有待還原的檔案（中斷發生在植入之前或還原之後），清除標記。' -ForegroundColor Yellow
     }
     Clear-Inflight
     Clear-RunLock
@@ -511,7 +510,7 @@ function Get-EffectiveTier {
 }
 
 # ==============================================================================
-# 殘骸回收（排在所有出口之前，含 -List：任何一次啟動都要有機會把上一輪的中間
+# 殘骸回收（排在所有出口之前，含 -List：任何一次啟動都要有機會把上一次執行的中間
 # 狀態收乾淨，不能因為這次只是查看清單就跳過）
 # ==============================================================================
 
