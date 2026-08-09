@@ -1,4 +1,4 @@
-function Export-RunePrivateKeyPem {
+﻿function Export-RunePrivateKeyPem {
     <#
         把 ECDH 私鑰序列化成 PEM 文字，供 -GenerateKeys 與 -ExportPrivateKey 共用。
 

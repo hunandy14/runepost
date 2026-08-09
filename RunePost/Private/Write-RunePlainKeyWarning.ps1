@@ -1,4 +1,4 @@
-function Write-RunePlainKeyWarning {
+﻿function Write-RunePlainKeyWarning {
     <#
         私鑰以未加密的 PKCS#8 PEM 落地時的告知。
 

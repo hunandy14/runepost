@@ -1,4 +1,4 @@
-function ConvertFrom-RuneSecureString {
+﻿function ConvertFrom-RuneSecureString {
     <#
         將 SecureString 還原為一般字串。
 

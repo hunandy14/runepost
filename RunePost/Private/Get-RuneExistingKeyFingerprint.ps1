@@ -1,4 +1,4 @@
-function Get-RuneExistingKeyFingerprint {
+﻿function Get-RuneExistingKeyFingerprint {
     <#
         供覆蓋提示使用：讀出既有私鑰、算出對應公鑰指紋，回傳可直接顯示的一行文字。
 
