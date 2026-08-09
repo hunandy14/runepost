@@ -30,9 +30,39 @@ runepost 解決的是「兩台自有機器之間只有純文字管道」這個�
 僅限 Windows 有兩個具體原因：私鑰的 `-Protect Dpapi` 選項依賴 Windows 的 DPAPI；
 私鑰檔的權限加固使用 NTFS ACL 語意。這兩者都沒有跨平台對應。
 
-取得方式是直接 clone 或下載整個 repo。加密端需要的是
-`rune-seal.ps1` 加上 `RunePost\` 整個資料夾；解密端需要 `rune-open.ps1` 加上同一個
-`RunePost\`。
+## 取得方式
+
+沒有安裝步驟。取得整個 repo 即可使用：
+
+```powershell
+git clone <這個 repo 的網址>
+```
+
+不想用 git 就在 GitHub 頁面按 **Code → Download ZIP**，解壓縮到任何目錄。
+
+### 執行期真正需要的檔案
+
+repo 裡只有兩樣東西是執行期需要的：
+
+```
+rune-seal.ps1     加密端入口
+rune-open.ps1     解密端與金鑰管理入口
+RunePost\         實作模組（整個資料夾，含 .psd1 / .psm1 / Public\ / Private\）
+```
+
+`` `tests\` ``、`` `docs\` ``、`` `.github\` `` 只在開發時用得到，**不需要帶到
+加密端**。入口腳本以 `$PSScriptRoot` 尋找模組，因此 `` `RunePost\` `` 必須與兩支
+`.ps1` 放在同一層。
+
+把工具部署到另一台機器時：
+
+| 角色 | 需要帶的東西 |
+|---|---|
+| **加密端** | `rune-seal.ps1`（帶著 `rune-open.ps1` 也無妨）+ `` `RunePost\` `` + 一份收件人的 `` `public.pem` `` |
+| **解密端** | `rune-open.ps1`（`rune-seal.ps1` 可選）+ `` `RunePost\` `` + 自己的 `` `~\.rune\private.key` `` |
+
+模組本身不含任何人的金鑰，兩端可以直接複製同一份檔案。金鑰的放置位置見
+「快速開始」。
 
 ## 快速開始
 
