@@ -251,8 +251,11 @@ header 中需要密碼學保護的只有 contentType，由 `info` 承擔（§4.4
 
 ### 4.6 記憶體中的金鑰材料
 
-- 共享祕密與派生的 AES 金鑰在用完後以 `[Array]::Clear` 歸零。加密端把清零寫在
-  `finally`，中途拋錯也會清除。
+- 共享祕密與派生的 AES 金鑰在用完後以 `[Array]::Clear` 歸零，**加密端與解密端一律
+  把清零寫在 `finally`**，因此 HKDF 派生或 AES-GCM 加解密中途拋錯時一樣會清除，
+  不會有金鑰材料因為走了例外路徑而留在記憶體裡。兩端各自的落點：加密端在同一個
+  `finally` 內清共享祕密與 AES 金鑰；解密端在派生的 `finally` 內清共享祕密（該
+  `finally` 同時 dispose 私鑰物件），在 GCM 解密的 `finally` 內清 AES 金鑰。
 - 私鑰檔讀進來的位元組在載入結束後歸零；未加密 PEM 格式時，那就是明文私鑰。
 - `SecureString` 還原成字串是必要的：.NET 的 PKCS#8 密碼保護 API 只接受
   `ReadOnlySpan<char>`，沒有 `SecureString` 多載。還原過程配置的非受管記憶體以
