@@ -671,10 +671,12 @@ function New-ZipWithEntries {
 # ==============================================================================
 # 7. 獨立解密鏈：私鑰 -> ECDH -> HKDF-SHA256 -> AES-GCM -> Brotli -> Zip
 #
-#    金鑰派生一律照 DESIGN §1 的規格參數直接算：
+#    金鑰派生一律照 DESIGN §1.3.1 的規格參數直接算：
+#      HKDF-SHA256
+#      ikm  = ECDH P-256 DeriveRawSecretAgreement 的原始共享祕密（不先雜湊）
 #      salt = nonce
 #      info = magic(4) ‖ version(1) ‖ contentType(1) ‖ ephemeral 公鑰 SPKI DER
-#      AES-GCM 不使用 AAD
+#      輸出 32 bytes，AES-GCM 不使用 AAD
 #    這是密碼學白盒：規格參數派生出來的金鑰若通不過 GCM 驗證，就是實作與規格不符，
 #    直接判 FAIL。
 # ==============================================================================
@@ -746,7 +748,7 @@ function Import-PrivateKeyFromBlob {
 $script:SpecMagic = 'RUNE'
 $script:SpecVersion = [byte]2
 
-# DESIGN §1.1 / §1.3 定死的 HKDF info：magic(4) ‖ version(1) ‖ contentType(1) ‖
+# DESIGN §1.3 / §1.3.1 定死的 HKDF info：magic(4) ‖ version(1) ‖ contentType(1) ‖
 # ephemeral 公鑰 SubjectPublicKeyInfo DER。三個 header 欄位都必須綁進來：GCM 不使用
 # AAD，tag 涵蓋不到 header 任何一個 byte，只有進了 info 的欄位被竄改時才會表現為
 # 認證失敗。
@@ -761,7 +763,23 @@ function Get-SpecKdfInfo {
     return , $info
 }
 
-# DESIGN §1：HKDF-SHA256(ikm = ECDH 共享祕密, salt = nonce, info = 上式) → 32 byte AES 金鑰。
+# 證據欄與錯誤訊息用：印出 info 的長度，以及前 8 個位元組按 magic(4) / version(1) /
+# contentType(1) / DER 起頭分段的 hex。派生對不上時，一眼看得出是哪一段的值不對，
+# 而不必回頭自己算位移。
+function Format-KdfInfo {
+    param([byte[]]$Info)
+    if ($Info.Length -lt 8) { return ('{0}B / {1}' -f $Info.Length, [Convert]::ToHexString($Info)) }
+    $seg = @(
+        [Convert]::ToHexString($Info, 0, 4)
+        [Convert]::ToHexString($Info, 4, 1)
+        [Convert]::ToHexString($Info, 5, 1)
+        ([Convert]::ToHexString($Info, 6, 2) + '…')
+    )
+    return ('{0}B / {1}' -f $Info.Length, ($seg -join ' '))
+}
+
+# DESIGN §1.3.1：HKDF-SHA256(ikm = DeriveRawSecretAgreement 的原始共享祕密、不先雜湊,
+# salt = nonce, info = 上式) → 32 byte，直接作為 AES-256-GCM 的金鑰。
 function Get-SpecContentKey {
     param([byte[]]$SharedSecret, [byte[]]$Nonce, [byte[]]$Info)
     return [System.Security.Cryptography.HKDF]::DeriveKey(
@@ -793,7 +811,7 @@ function Get-KdfAliasCollision {
     return , $hit.ToArray()
 }
 
-# 以 DESIGN §1 的規格參數解出容器內容，回傳 @{ Key; Plain; Aad; Aliases }。
+# 以 DESIGN §1.3.1 的規格參數解出容器內容，回傳 @{ Key; Plain; Aad; Info; Aliases }。
 # 派生的金鑰必須通過 GCM 驗證；通不過就是實作的 KDF 參數與規格不符，直接擲錯。
 function Resolve-ContentKey {
     param($Container, $Ecdh)
@@ -805,14 +823,15 @@ function Resolve-ContentKey {
     $info = Get-SpecKdfInfo -Version $Container.Version -ContentType $Container.ContentType -Epk $Container.Epk
     $key = Get-SpecContentKey -SharedSecret $z -Nonce $Container.Nonce -Info $info
 
-    # DESIGN §1.3：AES-GCM 不使用 AAD，tag 只涵蓋 ciphertext。
+    # DESIGN §1.3.1：AES-GCM 不使用 AAD，tag 只涵蓋 ciphertext。
     $plain = [byte[]]::new($Container.Cipher.Length)
     $gcm = New-AesGcm -Key $key
     try {
         $gcm.Decrypt($Container.Nonce, $Container.Cipher, $Container.Tag, $plain)
     }
     catch {
-        throw ('以 DESIGN §1 的規格參數（salt = nonce、info = magic‖version‖contentType‖ephemeral 公鑰 DER、AES-GCM 無 AAD）派生的金鑰無法通過 GCM 驗證，代表實作的 KDF 參數與 DESIGN §1 不符：{0}' -f $_.Exception.Message)
+        throw ('以 DESIGN §1.3.1 的規格參數（HKDF-SHA256、ikm = 原始共享祕密、salt = nonce、info = {0}、輸出 32B、AES-GCM 無 AAD）派生的金鑰無法通過 GCM 驗證，代表實作的 KDF 參數與 DESIGN §1.3.1 不符：{1}' -f `
+            (Format-KdfInfo -Info $info), $_.Exception.Message)
     }
     finally { $gcm.Dispose() }
 
@@ -820,6 +839,7 @@ function Resolve-ContentKey {
         Key     = $key
         Plain   = $plain
         Aad     = 'none'
+        Info    = $info
         Aliases = (Get-KdfAliasCollision -SharedSecret $z -Nonce $Container.Nonce -Epk $Container.Epk `
                 -Version $Container.Version -ContentType $Container.ContentType -SpecKey $key)
     }
@@ -844,7 +864,7 @@ function Compress-Brotli {
     return $out.ToArray()
 }
 
-# 以受測物的收件人公鑰 + DESIGN §1 的規格參數，偽造一個「密碼學上完全合法」的容器。
+# 以受測物的收件人公鑰 + DESIGN §1.3.1 的規格參數，偽造一個「密碼學上完全合法」的容器。
 # 派生只需要收件人公鑰，不需要私鑰，也不沿用任何從既有容器反推出來的東西。
 function New-ForgedRune {
     param([byte[]]$ZipBytes, [string]$Path, [byte]$ContentType = 1)
@@ -871,7 +891,7 @@ function New-ForgedRune {
 
     $ct = [byte[]]::new($plain.Length); $tag = [byte[]]::new(16)
     $gcm = New-AesGcm -Key $key
-    $gcm.Encrypt($nonce, $plain, $ct, $tag)   # DESIGN §1.3：不使用 AAD
+    $gcm.Encrypt($nonce, $plain, $ct, $tag)   # DESIGN §1.3.1：不使用 AAD
     $gcm.Dispose()
 
     $all = [System.Collections.Generic.List[byte]]::new()
@@ -1334,7 +1354,7 @@ Register-Fixture 'CtTree' { return (New-Container -Name 'tree' -Source (Get-FxPa
 # 讀不出來即實作與 §1.7.7 不符，Import-PrivateKeyFromBlob 會擲錯，這份素材連帶失敗。
 Register-Fixture 'PrivateKeyA' { return (Import-PrivateKeyFromBlob -BlobPath (Get-Fixture 'KeyA').KeyPath) }
 
-# 依 DESIGN §1 的規格參數解出資料夾密文。規格參數派生不出可用金鑰時 Resolve-ContentKey
+# 依 DESIGN §1.3.1 的規格參數解出資料夾密文。規格參數派生不出可用金鑰時 Resolve-ContentKey
 # 會擲錯，這份素材連帶失敗，依賴它的案例由 fixture 的負向記憶統一指回 C08。
 Register-Fixture 'KdfInfo' {
     $c = Read-Container (Get-Fixture 'CtTree').Out
@@ -1748,10 +1768,11 @@ Invoke-TCase 'C07' 'ephemeral 公鑰確為可匯入的 P-256 SubjectPublicKeyInf
     return ('P-256 SPKI 解析成功，consumed={0}B，且不等於收件人公鑰' -f $read)
 }
 
-Invoke-TCase 'C08' '獨立解密鏈：以 DESIGN §1 的規格參數派生金鑰（ECDH→HKDF-SHA256→AES-GCM→Brotli→Zip）' -Tier Core -Needs @('CtTree') {
-    # 整條鏈上沒有任何一步靠猜：私鑰照 §1.7.7 的三種儲存格式判別後匯入，salt 就是
-    # nonce，info 就是 magic‖version‖contentType‖ephemeral 公鑰 DER，GCM 不帶 AAD。
-    # 任何一步讀不出來或驗不過，都是實作與規格不符，由素材直接擲錯把本案判紅。
+Invoke-TCase 'C08' '獨立解密鏈：以 DESIGN §1.3.1 的規格參數派生金鑰（ECDH→HKDF-SHA256→AES-GCM→Brotli→Zip）' -Tier Core -Needs @('CtTree') {
+    # 整條鏈上沒有任何一步靠猜：私鑰照 §1.7.7 的三種儲存格式判別後匯入，金鑰派生照
+    # §1.3.1 的五格參數（HKDF-SHA256、原始共享祕密、salt = nonce、上述 info、32B），
+    # GCM 不帶 AAD。任何一步讀不出來或驗不過，都是實作與規格不符，由素材直接擲錯
+    # 把本案判紅。證據欄一併印出實際餵進 HKDF 的 info，供人工對照各欄位位移。
     $k = Get-Fixture 'KdfInfo'
     $zip = Get-Fixture 'ZipTree'
     Assert ($zip.Length -gt 0) 'Brotli 解壓結果為空'
@@ -1760,8 +1781,8 @@ Invoke-TCase 'C08' '獨立解密鏈：以 DESIGN §1 的規格參數派生金鑰
     $c = Read-Container (Get-Fixture 'CtTree').Out
     # 別名只是附加資訊，不參與判定：規格參數已經自己驗過了。
     $alias = if ($k.Aliases.Count) { '；觀測上等價的參數別名：' + ($k.Aliases -join '、') + '（不影響判定）' } else { '；無等價的參數別名' }
-    return ('HKDF-SHA256(salt=nonce, info=magic‖version‖contentType‖ephPubDer), AAD={0} 派生的金鑰通過 GCM 驗證；密文 {1}B → Brotli 解出 zip {2}B / {3} 筆項目{4}' -f `
-            $k.Aad, $c.Cipher.Length, $zip.Length, $entries.Count, $alias)
+    return ('HKDF-SHA256(ikm=原始共享祕密, salt=nonce({0}B), info={1}, len=32), AAD={2} 派生的金鑰通過 GCM 驗證；密文 {3}B → Brotli 解出 zip {4}B / {5} 筆項目{6}' -f `
+            $c.Nonce.Length, (Format-KdfInfo -Info $k.Info), $k.Aad, $c.Cipher.Length, $zip.Length, $entries.Count, $alias)
 }
 
 Invoke-TCase 'C09' 'ZIP 為純 store（NoCompression）且單檔也打包' -Tier Core -Needs @('ZipTree', 'CtSingle') {
@@ -1929,7 +1950,7 @@ Invoke-TCase 'C19' '偽造容器（tag 合法但明文非 Brotli）→ 報解壓
     $ct = [byte[]]::new($junk.Length)
     $tag = [byte[]]::new(16)
     $gcm = New-AesGcm -Key $k.Key
-    $gcm.Encrypt($c.Nonce, $junk, $ct, $tag)   # DESIGN §1.3：不使用 AAD
+    $gcm.Encrypt($c.Nonce, $junk, $ct, $tag)   # DESIGN §1.3.1：不使用 AAD
     $gcm.Dispose()
     $b = [System.Collections.Generic.List[byte]]::new()
     $b.AddRange([byte[]]($c.Bytes[0..($c.HeaderSize - 1)]))
