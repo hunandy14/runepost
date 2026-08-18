@@ -7,120 +7,95 @@
 
 ## 快速使用
 
-**程式印出來的一切都是英文**（摘要、進度、警告、錯誤訊息、確認提示，以及
-`Get-Help` 看到的說明）；本文件的敘述維持中文，引用的輸出則原樣照抄。
-
-除了「複製整個 `RunePost\` 資料夾 + 入口腳本」，每個 Release 另外提供**自足單檔**：
-一支 `rune-seal.ps1`、一支 `rune-open.ps1`，各自把整個模組內聯進去，**不需要
-`RunePost\` 資料夾**就能跑。加密端因此只要抓一個檔到任意機器就能用。以下是加密端的
-標準落地方式。
-
-
-### 先決條件：解密端已產生金鑰
-
-加密前，解密端（保管私鑰的那台機器）要先有一組金鑰。在那台機器上執行（金鑰管理的
-完整說明見下一節）：
+### 1. 安裝（從 Release 抓自足單檔）
 
 ```powershell
-pwsh .\rune-open.ps1 -GenerateKeys
+$dir = "$HOME\runepost"
+New-Item -ItemType Directory -Force $dir | Out-Null
+irm https://github.com/hunandy14/runepost/releases/latest/download/rune-seal.ps1 -OutFile $dir\rune-seal.ps1
+irm https://github.com/hunandy14/runepost/releases/latest/download/rune-open.ps1 -OutFile $dir\rune-open.ps1
+Get-ChildItem $dir\*.ps1 | Unblock-File   # 解除「從網路下載」的封鎖標記
 ```
 
-它會把私鑰寫到 `~\.rune\private.key`、公鑰寫到 `~\.rune\public.pem`，並在畫面上印出
-**公鑰指紋**那一行（`Fingerprint  RUNE-KEY ...`）。稍後你需要兩樣東西：
+### 2. 加入 PATH
 
-- **公鑰內容**——在解密端用 `Get-Content ~\.rune\public.pem` 讀出整段 PEM，拿去加密端。
-- **公鑰指紋**——記下畫面印的那一行，加密時用來逐字比對。
-
-### 安裝與加密（裝到 `~\.rune\`，與金鑰同位置）
-
-把單檔裝到 `~\.rune\`（和公鑰同一個資料夾），之後直接跑，不必每次都貼公鑰：
+把 `~\runepost` 加進使用者 PATH（免管理員權限），之後在任何位置都能呼叫：
 
 ```powershell
-# 1. 抓單檔到 ~\.rune\
-New-Item -ItemType Directory -Force $HOME\.rune | Out-Null
-irm https://github.com/hunandy14/runepost/releases/latest/download/rune-seal.ps1 -OutFile $HOME\.rune\rune-seal.ps1
-
-# 2. 把解密端的公鑰存成 ~\.rune\public.pem（貼上內容，或直接把檔案複製過來）
-@'
------BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...（整段貼進來）...
------END PUBLIC KEY-----
-'@ | Set-Content $HOME\.rune\public.pem -Encoding ascii
-
-# 3. 之後直接跑，seal 自動讀預設公鑰 ~\.rune\public.pem
-pwsh $HOME\.rune\rune-seal.ps1 C:\data\report
+$p = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($p -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$p;$dir", 'User') }
+$env:Path += ";$dir"   # 目前這個視窗也立即生效
 ```
 
-加密時畫面第一行一定會印出所用公鑰的指紋：
+若腳本被執行政策擋下，執行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
 
-```
-Recipient public key fingerprint: RUNE-KEY 59FF-4DEB-3191-7BDB-1997-3588-57DB-8292
-Compare it character by character with the fingerprint printed by -GenerateKeys or -ExportPublicKey on the decrypting machine. A mismatch means the public key may have been replaced.
-```
-
-**務必和解密端記下的指紋逐字比對**——這是察覺公鑰被掉包的唯一機會，理由見下方
-「公鑰怎麼裝」。之後每次執行也都會印，隨時可再核對。
-
-### 公鑰怎麼裝
-
-- **公鑰來源固定是解密端。** 那台跑 `-GenerateKeys` 的機器，畫面印出公鑰**指紋**，
-  公鑰**內容**則在 `~\.rune\public.pem`（用 `Get-Content ~\.rune\public.pem` 讀出）。
-  加密端自己不產生、也不該產生公鑰。
-- **公鑰不是祕密，傳輸走任何管道都行。** 隨身碟、雲端硬碟、即時通訊，甚至和密文貼在
-  同一個公開版面上都無所謂。公鑰本來就是設計成可以公開的東西，不需要保密管道。
-- **落地方式：存成 `~\.rune\public.pem`。** 之後 seal 自動讀取，不必每次指定
-  `-PublicKey`。也可以用 `-PublicKey` 一次性指定其他位置的檔案，或直接傳入 PEM
-  字串——這個參數仍是正式功能，只是不再是主推流程。
-- **唯一必做的檢查：核對指紋。** 加密時 seal 每次都印出所用公鑰的指紋，拿它和解密端
-  `-GenerateKeys` 或 `-ExportPublicKey` 印出的那一行逐字比對。一致，才代表你加密給的是
-  自己那把金鑰；不一致，代表 `~\.rune\public.pem` 或你貼的內容被掉包了。**工具不會、
-  也無法替你做這個比對。**
-
-### 首次信任：核對單檔的 SHA-256（選讀）
-
-擔心抓到的單檔在下載途中被動過手腳，可以在第一次使用前核對雜湊。每個 Release 頁面都
-附了一份 `SHA256SUMS.txt`，列出兩支單檔的 SHA-256：
+### 3. 初始化金鑰
 
 ```powershell
-Get-FileHash ~\.rune\rune-seal.ps1 -Algorithm SHA256
-# 把印出的 Hash 和 Release 頁面 SHA256SUMS.txt 裡 rune-seal.ps1 那一行比對
+rune-open.ps1 -GenerateKeys
 ```
 
-一致就代表這支單檔和發布的位元組完全相同。**同一個版本驗過一次就夠了**，之後重抓
-同一版不必再驗。
+私鑰寫到 `~\.rune\private.key`、公鑰寫到 `~\.rune\public.pem`，並印出**公鑰指紋**
+（`Fingerprint  RUNE-KEY ...`）。記下這行，跨機器時用來核對。
 
-### 兩種雜湊別搞混
+### 4. 加密
 
-這裡有兩個各自獨立的核對動作，驗的是不同的東西：
+```powershell
+rune-seal.ps1 $HOME\runepost      # 檔案或資料夾都行——這裡拿剛裝好的資料夾當範例
+```
+
+產出 `runepost.txt`（以來源資料夾命名）——一段可直接貼上的 Base64；第一行會印出所用公鑰的指紋。
+
+### 5. 解密
+
+```powershell
+rune-open.ps1 runepost.txt $env:TEMP\runepost-out
+```
+
+```
+Decryption complete. Restored 2 files to: C:\Users\alice\AppData\Local\Temp\runepost-out.
+```
+
+還原的檔案在 `$env:TEMP\runepost-out`——剛才 `~\runepost` 底下的兩支 `.ps1` 都回來了，
+資料夾的子目錄結構也會原樣保留。
+
+### 跨機器使用
+
+runepost 是**單向**傳送：金鑰對永遠在解密端（B）產生，私鑰不離開 B；加密端（A）只拿公鑰。
+
+```mermaid
+sequenceDiagram
+    participant B as B 解密端
+    participant A as A 加密端
+    B->>B: 產生金鑰，記下指紋
+    B->>A: 交付 public.pem 公鑰
+    A->>A: 加密，先比對指紋
+    A->>B: 送出 Base64 密文
+    B->>B: 解密還原檔案
+```
+
+- **B** 跑第 1–3 步、**A** 跑第 1、2、4 步（A 第 2 步放的是 B 給的公鑰），密文傳回後 **B** 跑第 5 步。
+- **公鑰不是祕密**：複製它走隨身碟、雲端、甚至和密文貼在同一個公開版面都行。
+- **唯一必做的檢查**——A 每次加密都印出所用公鑰的指紋，**務必和 B 在第 3 步記下的那行逐字
+  比對**。不一致代表 `public.pem` 被掉包；工具不會、也無法替你比對。
+
+> 也可以用 `-PublicKey` 一次性指定公鑰檔或直接傳入 PEM 字串，不必先放到 `~\.rune\`。
+
+### 驗證下載的單檔（選讀）
+
+每個 Release 附了 `SHA256SUMS.txt`。擔心單檔在下載途中被動過手腳，第一次用前核對雜湊：
+
+```powershell
+Get-FileHash $HOME\runepost\rune-seal.ps1 -Algorithm SHA256
+# 和 Release 頁面 SHA256SUMS.txt 裡 rune-seal.ps1 那行比對；同一版驗過一次就夠
+```
+
+這裡有**兩個各自獨立**的核對，別搞混：
 
 | 驗什麼 | 用哪個 | 來源 |
 |---|---|---|
-| 工具是不是原版 | **檔案 SHA-256**（`Get-FileHash`） | Release 頁面的 `SHA256SUMS.txt` |
-| 公鑰是不是我的 | **RUNE-KEY 指紋** | 解密端 `-GenerateKeys` 印出的那一行 |
-
-**檔案 SHA-256** 防「單檔在下載途中被換掉」，**RUNE-KEY 指紋** 防「公鑰被掉包」。
-兩者各管一件事，別拿其中一個當另一個用。
-
-### 解密端：把檔案還原回來
-
-密文就是一段純 Base64，每 76 字元換行，貼到任何純文字管道都行。在解密端把那段文字
-取回、存成一個文字檔，再解開（解密端同樣可用自足單檔 `rune-open.ps1`，或整個模組）：
-
-```powershell
-pwsh .\rune-open.ps1 -Unpack report.txt -Destination C:\out\restored
-```
-
-```
-Decryption complete. Restored 2 files to: C:\out\restored.
-```
-
-`-Unpack` 與 `-Destination` 也可以省略參數名稱依序放位置：
-
-```powershell
-pwsh .\rune-open.ps1 report.txt C:\out\restored
-```
-
-解密端與金鑰管理（產生、備份、輪替、匯出）的完整說明見下一節「金鑰管理」。
+| 工具是不是原版 | **檔案 SHA-256**（`Get-FileHash`） | Release 的 `SHA256SUMS.txt` |
+| 公鑰是不是我的 | **RUNE-KEY 指紋** | 解密端 `-GenerateKeys` 印的那行 |
 
 ## 這是什麼
 
@@ -170,8 +145,7 @@ RunePost\         實作模組（整個資料夾，含 .psd1 / .psm1 / Public\ /
 ```
 
 `` `tests\` ``、`` `docs\` ``、`` `.github\` `` 只在開發時用得到，**不需要帶到
-加密端**。入口腳本以 `$PSScriptRoot` 尋找模組，因此 `` `RunePost\` `` 必須與兩支
-`.ps1` 放在同一層。
+加密端**；`` `RunePost\` `` 必須與兩支 `.ps1` 放在同一層。
 
 把工具部署到另一台機器時：
 
@@ -188,205 +162,66 @@ RunePost\         實作模組（整個資料夾，含 .psd1 / .psm1 / Public\ /
 
 ## 金鑰管理
 
-### 私鑰的三種儲存格式
+金鑰操作都在解密端用 `rune-open.ps1`。預設值取捨、確認提示語意與完整輸出見
+`docs/DESIGN.md` §5。
 
-`-GenerateKeys -Protect` 決定私鑰在磁碟上的保護方式。三種格式都寫到
-`` `~\.rune\private.key` ``，解密時由檔案內容自動判別，不需要指定。
+**私鑰儲存格式**——`-GenerateKeys -Protect` 決定，三種都寫到 `` `~\.rune\private.key` ``，
+解密時由內容自動判別：
 
-| `-Protect` | 落地內容 | 可否備份到別台機器 | 使用時要輸入密碼 |
+| `-Protect` | 落地內容 | 可備份到別台 | 需輸入密碼 |
 |---|---|---|---|
-| `None`（**預設**） | 未加密的 PKCS#8 PEM | 可，直接複製檔案 | 否 |
-| `Passphrase` | 密碼保護的 PKCS#8 PEM（PBKDF2-HMAC-SHA256 600000 次 + AES-256-CBC） | 可，還原時需要密碼 | 是 |
-| `Dpapi` | DPAPI（CurrentUser）位元組 | **不可** | 否 |
+| `None`（**預設**） | 未加密 PKCS#8 PEM | 可，直接複製 | 否 |
+| `Passphrase` | 密碼保護 PKCS#8 PEM | 可，還原需密碼 | 是 |
+| `Dpapi` | DPAPI 位元組（綁本機本帳號） | **不可** | 否 |
 
-**預設是 `None`，也就是未加密的私鑰檔。** 這是刻意的取捨：密文一旦貼到公開管道就
-永久存在，而私鑰是唯一的還原手段——私鑰遺失等同所有歷來密文永久無法解密。`Dpapi`
-的靜態保護最強，但綁定本機與本 Windows 帳號，重灌或換帳號後就再也解不開，也無法
-備份。預設把可攜性放在靜態加密之前，代價就是那個未加密的檔案，因此每次產生都會
-印出三行警告。
+預設 `None` 是**未加密**的私鑰檔——把可攜性放在靜態加密之前，代價見〈安全須知〉。
+每個私鑰檔的權限都會收斂到只剩檔案擁有者與 `SYSTEM`。
 
-檔案權限一律收斂：本工具寫出的每一個私鑰檔都會中斷繼承，只留下檔案擁有者與
-`SYSTEM` 兩個帳號。
-
-想要靜態加密又要能備份，用 `-Protect Passphrase`：
+**備份私鑰**（也是把 DPAPI 私鑰匯出成可攜 PEM 的唯一途徑）：
 
 ```powershell
-pwsh .\rune-open.ps1 -GenerateKeys -Protect Passphrase
+rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem -Force
 ```
 
-密碼會在畫面上詢問並要求輸入兩次確認（打錯就永久解不開那個檔案）。非互動環境請以
-`-Passphrase (Read-Host -AsSecureString)` 傳入。
-
-### 備份私鑰
+**補回或重印公鑰**（`` `public.pem` `` 可由私鑰完全重現，順便再看一次指紋）：
 
 ```powershell
-pwsh .\rune-open.ps1 -ExportPrivateKey -OutFile D:\backup\rune-private.pem -Force
+rune-open.ps1 -ExportPublicKey
 ```
 
-```
-Exported the private key. Format: unencrypted PKCS#8 PEM.
-  Source       C:\Users\alice\.rune\private.key
-  Output       D:\backup\rune-private.pem
-  Fingerprint  RUNE-KEY 59FF-4DEB-3191-7BDB-1997-3588-57DB-8292
-To decrypt with this backup: rune-open.ps1 -Unpack <ciphertext file> -Destination <destination folder> -KeyFile D:\backup\rune-private.pem
-WARNING: The private key is stored as an unencrypted PKCS#8 PEM at D:\backup\rune-private.pem.
-WARNING: Anyone who can read this file can decrypt every ciphertext encrypted to the matching public key.
-WARNING: Do not place this file in a cloud-sync folder or a version-control directory.
-```
+**輪替金鑰**：`-GenerateKeys` 偵測到既有私鑰時會先確認（非互動要 `-Force`）。舊金鑰**改名
+保留**成 `` `private.key.bak-<時間戳>` `` 而非刪除，舊密文用 `-KeyFile` 指向備份仍解得開。
 
-匯出**來源可以是 DPAPI 私鑰**——這是把 DPAPI 私鑰離機保存的唯一途徑。輸出格式用
-`-Protect Passphrase` 可以加密（密碼以 `-OutPassphrase` 指定，與來源私鑰的
-`-Passphrase` 分開）。
-
-匯出會多一份私鑰落地，因此預設要求確認。非互動環境（例如把輸出導向檔案）不帶
-`-Force` 會直接被拒絕：
-
-```
-Cannot export the private key: this is a non-interactive session (standard input is redirected), so the confirmation prompt cannot be displayed.
-Specify -Confirm:$false to skip the confirmation (with rune-open.ps1, specify -Force), or run the command again in an interactive session.
-```
-
-### 補回或重印公鑰
-
-`` `public.pem` `` 由 `` `private.key` `` 可以完全重現，刪掉了不要緊：
-
-```powershell
-pwsh .\rune-open.ps1 -ExportPublicKey
-```
-
-```
-Re-exported the public key.
-  Private key  C:\Users\alice\.rune\private.key
-  Public key   C:\Users\alice\.rune\public.pem
-  Fingerprint  RUNE-KEY 59FF-4DEB-3191-7BDB-1997-3588-57DB-8292
-```
-
-它同時是「再看一次我的指紋」的工具，隨時可以拿來與加密端核對。
-
-### 重新產生金鑰（輪替）
-
-`-GenerateKeys` 偵測到 `` `~\.rune\private.key` `` 已存在時不會直接覆蓋：互動環境下
-先印出現有金鑰的指紋，再詢問是否繼續；非互動環境直接拒絕，要輪替請帶 `-Force`。
-
-提示遵循 PowerShell 的標準確認行為，與 `Remove-Item -Confirm` 一樣：選項是
-`Y`（是）／`A`（全部皆是）／`N`（否）／`L`（全部皆否）／`S`（暫停），**預設是
-`Y`，直接按 Enter 就會繼續**。不想繼續請明確選 `N`。按錯也不會遺失金鑰——舊金鑰
-是改名保留而不是刪除，見下一段。
-
-確認之後，**舊金鑰是改名保留而不是刪除**：`` `private.key` `` 變成
-`` `private.key.bak-<時間戳>` ``，`` `public.pem` `` 以同一個時間戳一併改名。舊密文
-仍然解得開，只要指定備份路徑：
-
-```powershell
-pwsh .\rune-open.ps1 -Unpack old.txt -Destination C:\out -KeyFile ~\.rune\private.key.bak-20260809-121500
-```
-
-### 一次性指定公鑰
-
-加密端不想在機器上放 `` `public.pem` `` 時，可以用 `-PublicKey`。字串含
-`-----BEGIN` 視為 PEM 內容本體，否則視為檔案路徑：
-
-```powershell
-pwsh .\rune-seal.ps1 C:\data\report.docx -PublicKey D:\keys\bob.pem
-```
-
-多行 PEM 請用變數或 here-string 帶入，不要直接打在命令列上。
+**一次性指定公鑰**：加密端不想放 `` `public.pem` `` 時，用 `-PublicKey`（接檔案路徑，或含
+`-----BEGIN` 的 PEM 字串本體）。
 
 ## ⚠ 安全須知
 
-**請在第一次使用前讀完這一節。**
+**第一次使用前請讀完這幾條**（完整的安全性質與邊界、哪些有測試涵蓋，見 `docs/DESIGN.md` §7）：
 
-- **私鑰遺失 = 所有密文永久無法解開。** 沒有任何後門、沒有恢復碼、沒有備援金鑰。
-  密文一旦貼到公開管道就永久存在，而私鑰是唯一的還原手段。
-  **產生金鑰後請立刻用 `-ExportPrivateKey` 做一份離線備份。**
-- **`-Protect Dpapi` 綁機器綁帳號。** 換機器、換 Windows 帳號、重灌系統之後，
-  DPAPI 私鑰一律讀不開，而且無法複製備份。選它之前請先確認你已經用
-  `-ExportPrivateKey` 匯出了一份可攜的 PEM。
-- **預設的私鑰檔沒有加密。** `-Protect None` 產生的
-  `` `~\.rune\private.key` `` 是明文 PKCS#8 PEM。任何能讀到這個檔案的人，都能解開
-  所有以對應公鑰加密的密文。不要放進雲端同步資料夾或版本控管目錄。
-- **無寄件人認證。** 公鑰是公開的，任何拿到它的人都能造出一個你解得開的容器。
-  **「解得開」不代表「是你自己寄的」**，也不代表內容沒有被換成另一份合法內容。
-  本工具沒有簽章機制。
-- **無前向保密。** 私鑰一旦外洩，攻擊者可以解開他手上**所有**歷史密文。一次性的
-  ECDH 金鑰對只保證每則密文用不同的內容金鑰，不保證舊密文在私鑰外洩後仍然安全。
-- **不提供不可觀測性。** 輸出是固定結構的 Base64，開頭必然是 `UlVORQ`（`RUNE` 的
-  編碼），可以被 grep 直接掃出來。容器長度與原始資料量單調相關，會洩漏負載規模。
-  這不是隱寫術。
-- **輸出檔名會洩漏原始檔名。** 預設輸出是 `<原始檔名>.txt`。檔名本身就是明文，
-  需要規避時請用 `-OutFile` 指定一個無意義的名稱。
-- **絕不要對來源不明的文字執行 `-Unpack`。** 解包會在你的磁碟上建立檔案。本工具
-  對路徑逃逸（zip-slip）有兩道防線，解包失敗也會完整回滾，但它**不掃毒、不檢查
-  副檔名、不限制檔案數量與大小**。
-- **`-Destination` 請指向空資料夾。** 目的資料夾內既有的同名檔案會被覆蓋。
-- **第一次使用時務必比對指紋。** 加密端每次執行都會印出所用公鑰的指紋，解密端的
-  `-GenerateKeys` 與 `-ExportPublicKey` 印出相同格式。兩邊逐字一致才代表你加密給的
-  是自己那把金鑰。**工具不會、也無法替你做這個比對。**
+- **私鑰遺失 = 所有密文永久無法解開。** 沒有後門、沒有恢復碼。密文貼到公開管道就永久
+  存在，私鑰是唯一的還原手段。**產生金鑰後請立刻用 `-ExportPrivateKey` 做離線備份。**
+- **預設的私鑰檔沒有加密。** `-Protect None` 的 `` `~\.rune\private.key` `` 是明文 PEM，
+  任何能讀到它的人都能解開所有對應密文；不要放進雲端同步或版本控管目錄。
+- **無寄件人認證。** 公鑰是公開的，任何拿到它的人都能造出你解得開的容器。**「解得開」
+  不代表「是你自己寄的」**——本工具沒有簽章機制。
+- **不要對來源不明的文字執行 `-Unpack`，`-Destination` 請指向空資料夾。** 解包會在磁碟上
+  建檔；zip-slip 有兩道防線、失敗會回滾，但它不掃毒、不限制檔案數量與大小，且會覆蓋同名檔。
 
 ## 開發
 
-### 驗收套件
-
 ```powershell
 pwsh -File .\tests\verify.ps1 -RepoRoot . -Tier Core   # 安全性子集，約一分鐘
-pwsh -File .\tests\verify.ps1 -RepoRoot . -Tier Full   # 全部
+pwsh -File .\tests\verify.ps1 -RepoRoot . -Tier Full   # 全部 93 案
+pwsh -File .\tools\Build-Bundle.ps1 -Product all       # 產出 dist\ 的自足單檔
 ```
 
-對兩支入口腳本執行的黑箱驗收，共 93 案（Core 43 / Full-only 50）。案例只透過命令列
-呼叫受測物，不引用模組內部；金鑰派生與私鑰儲存格式另有依規格獨立實作的白盒驗證，
-規格參數解不出來就直接判定為實作與 `docs/DESIGN.md` 不符。所有會動到
-`` `~\.rune` `` 的案例都在沙箱家目錄下執行，且每次經由統一呼叫點啟動受測物之後都會
-檢查真實家目錄未被污染。
+黑箱驗收套件 93 案（Core 43 / Full 93），只透過命令列呼叫、不引用模組內部。另有變異測試
+（`tests\mutate.ps1`）刻意植入已知缺陷、驗證斷言真的會紅。測試分層、變異原理、單檔內聯
+機制與 CI 見 `docs/DESIGN.md` §8。
 
-`-Filter` 可以只跑編號符合正則的案例（例如 `-Filter 'C0[1-9]'`）。
-
-### 變異測試
-
-```powershell
-pwsh -File .\tests\mutate.ps1 -List              # 只列出變異與預期變紅的案號
-pwsh -File .\tests\mutate.ps1                    # 全部執行，預設 -Tier Core
-pwsh -File .\tests\mutate.ps1 -Mutation M6 -Tier Full
-```
-
-驗收套件全綠只證明「行為沒變」，不證明「斷言有效」。變異測試在產品程式碼裡刻意
-植入一個已知缺陷（停用 zip-slip 檢查、把 contentType 拿出 HKDF info、固定 nonce、
-讓錯誤訊息退化成泛泛的失敗……），跑一次驗收套件，檢查該紅的案號真的紅了。目前
-收錄 17 項。
-
-植入與還原成對執行，還原後以整份程式碼的雜湊確認逐位元組相同；被強制中斷時下一次
-啟動會自動還原。**修改產品程式碼時，若動到某項變異引用的那幾行（含註解），必須
-同步更新 `tests/mutate.ps1` 的變異定義**，否則該項變異會找不到替換目標而失效。
-
-### 自足單檔
-
-```powershell
-pwsh -File .\tools\Build-Bundle.ps1 -Product all          # 產出 dist\rune-seal.ps1 與 rune-open.ps1
-pwsh -File .\tools\Build-Bundle.ps1 -Check                # 只驗不寫：磁碟產物與現組是否逐位元組相同
-pwsh -File .\tools\Test-BundleEquivalence.ps1             # 逐字元證明 bundle 內聯的函式與模組一致
-```
-
-`tools\Build-Bundle.ps1` 把模組 `RunePost\` 與一支入口腳本組成一支自足單檔：
-comment-based help 在最前面、`#Requires` 其後、`param` 為第一個語句，接著內聯模組層級
-常數與全部函式，最後接上入口腳本的分派本體（`Import-Module` 那行被移除）。產物為
-UTF-8 with BOM、LF，檔頭標記來源內容的 SHA-256 前 12 碼以供溯源。
-
-`dist\` 不進版控：單檔是發布產物，由上面的 bundler 從源碼現組，於打 tag 時由 CI 建置
-並附到 Release。要在本機看產物，自己跑一次 bundler 即可。
-
-bundle 與模組的等價由兩軌證明：`tests\verify.ps1` 以 `-SealScript` / `-OpenScript` 指向
-dist 的單檔，可對 bundle 版跑同一批 93 案；`tools\Test-BundleEquivalence.ps1` 再以 AST
-逐字元比對確認內聯沒有改動任何一個字。
-
-### CI
-
-`.github/workflows/module-check.yml` 在每次 push 與 pull request 檢查模組可載入、
-manifest 的匯出清單與 `RunePost\Public\` 的實際檔案一致、一檔一函式且檔名等於函式名、
-兩支入口腳本語法可解析。完整驗收與變異測試需要 Windows 上的 DPAPI 與 NTFS ACL，
-在本機執行。
-
-`.github/workflows/release.yml` 在推送 `v*` tag 時於 `windows-latest` 組出兩支自足單檔、
-跑 `bundler -Check` 確認與源碼一致、算出 `SHA256SUMS.txt`，再把三個檔附到該 tag 的
-GitHub Release。
+> 修改產品程式碼若動到某項變異引用的行（含註解），要同步更新 `tests/mutate.ps1` 的變異定義，
+> 否則該項變異會找不到替換目標而失效。
 
 ## 聲明
 
