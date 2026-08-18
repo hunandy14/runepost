@@ -1,0 +1,66 @@
+# 打 v* tag 時自動建 GitHub Release，附上兩支自足單檔與其 SHA-256。
+#
+# dist\ 不進版控（單檔是發布產物、非開發必需）：這裡於 tag 當下由 bundler 從源碼
+# 現組，因此不可能有「手改了 dist 沒重建」的漂移——產物與該 tag 的源碼必然一致。
+# 仍跑一次 -Check 作為 bundler 的確定性斷言：現組之後再組一次，要求兩次逐位元組相同。
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # 建立 Release、上傳附件需要寫入權限
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # windows-latest 內建的 pwsh 為 7.4+，直接使用。這一步在版本低於 7.4 時明確中止，
+      # 免得 bundler 的 #Requires -Version 7.4 以較隱晦的方式失敗。
+      - name: 確認 pwsh 版本 >= 7.4
+        shell: pwsh
+        run: |
+          $v = $PSVersionTable.PSVersion
+          Write-Host "pwsh $v"
+          if ($v -lt [version]'7.4') { throw "需要 PowerShell 7.4 以上，實際 $v" }
+
+      - name: 組裝自足單檔
+        shell: pwsh
+        run: pwsh -File tools/Build-Bundle.ps1 -Product all -OutDir dist
+
+      - name: 驗證產物與源碼一致（bundler -Check）
+        shell: pwsh
+        run: pwsh -File tools/Build-Bundle.ps1 -Check -OutDir dist
+
+      - name: 產出 SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = 'rune-seal.ps1', 'rune-open.ps1'
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -LiteralPath "dist/$f" -Algorithm SHA256).Hash.ToLower()
+            "$h  $f"
+          }
+          $text = ($lines -join "`n") + "`n"
+          [System.IO.File]::WriteAllText("dist/SHA256SUMS.txt", $text, [System.Text.UTF8Encoding]::new($false))
+          Write-Host $text
+
+      - name: 建立 Release 並附上單檔與雜湊
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            dist/rune-seal.ps1
+            dist/rune-open.ps1
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          body: |
+            自足單檔發布（runepost）。
+
+            - `rune-seal.ps1`、`rune-open.ps1`：各自內聯整個 RunePost 模組，不需要 `RunePost\` 資料夾即可執行。
+            - `SHA256SUMS.txt`：兩支單檔的 SHA-256。下載後可用 `Get-FileHash` 核對「工具是不是原版」。
+
+            用法見 README 的「快速使用」。本工具不烘任何公鑰，請自備收件人公鑰。

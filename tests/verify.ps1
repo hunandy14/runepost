@@ -49,7 +49,15 @@ param(
     [string]$Tier = 'Full',
 
     # 單次子行程逾時秒數
-    [int]$TimeoutSec = 180
+    [int]$TimeoutSec = 180,
+
+    # 覆寫受測的加密端／解密端腳本路徑。預設為 <RepoRoot>\rune-seal.ps1 與
+    # rune-open.ps1（模組版）。指定後，所有「執行入口腳本」的案例（含 P1a/P1b 的
+    # 語法解析、C40 的自體不變）改對這兩個路徑跑，其餘仰賴 RunePost\ 模組本身的
+    # 案例（P0、P7、C63/C64、C67/C68 等）一律照舊指向 <RepoRoot>\RunePost。這讓
+    # dist\ 的自足單檔能跑同一批 93 案，而不必改動 repo 內的入口腳本或模組。
+    [string]$SealScript,
+    [string]$OpenScript
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,8 +84,8 @@ $script:ModuleRoot = Join-Path $script:RepoRoot 'RunePost'
 # 受測腳本的絕對路徑與初始雜湊在任何案例執行前就固定下來：C40 拿它比對「受測物
 # 自始至終未被改動」，而 Invoke-Seal / Invoke-Open 也需要在 P1a/P1b 之外就能用
 # （否則 -Filter 篩掉前置案例時會拿到 $null）。
-$script:SutSeal = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot 'rune-seal.ps1'))
-$script:SutOpen = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot 'rune-open.ps1'))
+$script:SutSeal = if ($SealScript) { [System.IO.Path]::GetFullPath($SealScript) } else { [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot 'rune-seal.ps1')) }
+$script:SutOpen = if ($OpenScript) { [System.IO.Path]::GetFullPath($OpenScript) } else { [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot 'rune-open.ps1')) }
 
 function Write-Log {
     param([string]$Text)

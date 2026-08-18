@@ -8,3 +8,7 @@ tests/_mutwork/
 
 # 開發過程的暫存測試資料（本 repo 約定放這裡，不進版控）
 /scratchpad/
+
+# 自足單檔是發布產物，由 tools\Build-Bundle.ps1 從源碼現組、於 tag 時由 CI 附到
+# Release，不進版控（避免與源碼並存成兩份真相而漂移）。本機要看產物自己跑 bundler。
+/dist/
