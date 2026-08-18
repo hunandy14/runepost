@@ -347,4 +347,4 @@ manifest 的匯出清單與 `RunePost\Public\` 的實際檔案一致、一檔一
 
 ## 授權
 
-授權條款待定。
+[MIT License](LICENSE)。
