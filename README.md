@@ -154,7 +154,7 @@ runepost 解決的是「兩台自有機器之間只有純文字管道」這個�
 沒有安裝步驟。取得整個 repo 即可使用：
 
 ```powershell
-git clone <這個 repo 的網址>
+git clone https://github.com/hunandy14/runepost
 ```
 
 不想用 git 就在 GitHub 頁面按 **Code → Download ZIP**，解壓縮到任何目錄。
