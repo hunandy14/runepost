@@ -77,7 +77,6 @@ RunePost\         實作模組（整個資料夾，含 .psd1 / .psm1 / Public\ /
 `RunePost\` 資料夾**就能跑。加密端因此只要抓一個檔到任意機器就能用。以下兩段是加密端
 最常見的兩種落地方式。
 
-> 下載網址中的 `OWNER/runepost` 請換成這個 repo 在 GitHub 上的實際路徑。
 
 ### 先決條件：解密端已產生金鑰
 
@@ -100,7 +99,7 @@ pwsh .\rune-open.ps1 -GenerateKeys
 
 ```powershell
 # 1. 抓一個自足單檔到暫存目錄
-irm https://github.com/OWNER/runepost/releases/latest/download/rune-seal.ps1 -OutFile $env:TEMP\rune-seal.ps1
+irm https://github.com/hunandy14/runepost/releases/latest/download/rune-seal.ps1 -OutFile $env:TEMP\rune-seal.ps1
 
 # 2. 貼上解密端的公鑰（here-string，內容來自解密端的 Get-Content ~\.rune\public.pem）
 $pub = @'
@@ -134,7 +133,7 @@ Compare it character by character with the fingerprint printed by -GenerateKeys 
 ```powershell
 # 1. 抓單檔到 ~\.rune\
 New-Item -ItemType Directory -Force $HOME\.rune | Out-Null
-irm https://github.com/OWNER/runepost/releases/latest/download/rune-seal.ps1 -OutFile $HOME\.rune\rune-seal.ps1
+irm https://github.com/hunandy14/runepost/releases/latest/download/rune-seal.ps1 -OutFile $HOME\.rune\rune-seal.ps1
 
 # 2. 把解密端的公鑰存成 ~\.rune\public.pem（貼上內容，或直接把檔案複製過來）
 @'

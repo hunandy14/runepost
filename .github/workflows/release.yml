@@ -17,7 +17,7 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # windows-latest 內建的 pwsh 為 7.4+，直接使用。這一步在版本低於 7.4 時明確中止，
       # 免得 bundler 的 #Requires -Version 7.4 以較隱晦的方式失敗。
@@ -50,7 +50,7 @@ jobs:
           Write-Host $text
 
       - name: 建立 Release 並附上單檔與雜湊
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             dist/rune-seal.ps1
